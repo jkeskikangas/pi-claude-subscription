@@ -53,6 +53,13 @@ function verify(dir) {
 	return res;
 }
 
+/** The environment of a plain terminal: no API key, no Claude Code identity inherited from a parent session. */
+function cleanEnv() {
+	const env = { ...process.env };
+	for (const k of ["ANTHROPIC_API_KEY", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]) delete env[k];
+	return env;
+}
+
 function lines(child, onEvent) {
 	let buf = "";
 	child.stdout.on("data", (d) => {
@@ -74,7 +81,7 @@ async function runPi(dir, tag) {
 	const child = spawn(
 		join(root, "node_modules/.bin/pi"),
 		["--mode", "rpc", "--no-extensions", "-e", join(root, "src/index.ts"), "--no-skills", "--no-session", "--model", `claude-sdk/${args.model}`, "--thinking", args.effort],
-		{ cwd: dir, env: { ...process.env, ANTHROPIC_BASE_URL: `${PROXY}/run/${tag}`, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" }, stdio: ["pipe", "pipe", "inherit"] },
+		{ cwd: dir, env: { ...cleanEnv(), ANTHROPIC_BASE_URL: `${PROXY}/run/${tag}`, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" }, stdio: ["pipe", "pipe", "inherit"] },
 	);
 	let waiter;
 	lines(child, (ev) => {
@@ -96,7 +103,7 @@ async function runClaude(dir, tag) {
 	const child = spawn(
 		"claude",
 		["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", args.model, "--effort", args.effort, "--setting-sources", "", "--strict-mcp-config", "--dangerously-skip-permissions"],
-		{ cwd: dir, env: { ...process.env, ANTHROPIC_BASE_URL: `${PROXY}/run/${tag}` }, stdio: ["pipe", "pipe", "inherit"] },
+		{ cwd: dir, env: { ...cleanEnv(), ANTHROPIC_BASE_URL: `${PROXY}/run/${tag}` }, stdio: ["pipe", "pipe", "inherit"] },
 	);
 	let waiter;
 	lines(child, (ev) => {

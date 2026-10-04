@@ -124,6 +124,8 @@ http
 							usage,
 							stopReason,
 							betas: req.headers["anthropic-beta"],
+							// Billing route as Anthropic reports it (plan window vs overage); no credentials.
+							billing: Object.fromEntries(Object.entries(upRes.headers).filter(([k]) => k.startsWith("anthropic-ratelimit-unified"))),
 						};
 						if (upRes.statusCode >= 400) rec.error = text.slice(0, 500);
 						appendFileSync(join(outDir, `${tag}.jsonl`), JSON.stringify(rec) + "\n");

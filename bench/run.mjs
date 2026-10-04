@@ -36,8 +36,11 @@ mkdirSync(piAgentDir, { recursive: true });
 
 function armCommand(arm, prompt, tag) {
 	const env = { ...process.env, ANTHROPIC_BASE_URL: `${PROXY}/run/${tag}` };
-	delete env.ANTHROPIC_API_KEY;
-	if (arm === "pi") {
+	// Run every arm as from a plain terminal: no API key, and no Claude Code identity inherited
+	// from a parent Claude Code session (it would change how Anthropic classifies the traffic).
+	for (const k of ["ANTHROPIC_API_KEY", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]) delete env[k];
+	if (arm === "pi" || arm === "pi-default") {
+		if (arm === "pi-default") env.PI_CLAUDE_SDK_PROMPT = "pi";
 		return {
 			cmd: join(root, "node_modules/.bin/pi"),
 			argv: ["--no-extensions", "-e", join(root, "src/index.ts"), "--no-skills", "--no-session", "--model", `claude-sdk/${args.model}`, "--thinking", args.effort, "-p", prompt],
@@ -73,12 +76,14 @@ function run(cmd, argv, opts) {
 
 function usageFor(tag) {
 	const file = join(proxyDir, `${tag}.jsonl`);
-	const totals = { requests: 0, input: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 0, byModel: {}, errors: 0 };
+	const totals = { requests: 0, input: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 0, byModel: {}, errors: 0, overage: 0, extraUsage400: 0 };
 	if (!existsSync(file)) return totals;
 	for (const line of readFileSync(file, "utf8").trim().split("\n")) {
 		const r = JSON.parse(line);
 		if (!r.path?.startsWith("/v1/messages")) continue;
 		if (r.status >= 400) totals.errors++;
+		if (r.status === 400 && /extra usage/i.test(r.error ?? "")) totals.extraUsage400++;
+		if (/overage|out_of_credits/.test(r.billing?.["anthropic-ratelimit-unified-representative-claim"] ?? "")) totals.overage++;
 		const u = r.usage ?? {};
 		if (u.input_tokens == null) continue;
 		totals.requests++;

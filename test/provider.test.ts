@@ -325,9 +325,9 @@ describe("configuration (F1)", () => {
 		assert.equal(resolveConfig({ cwd, agentDir, env: {} }).maxSessions, 5, "harmless project settings still apply");
 		for (const bad of [{ maxSessions: "lots", idleMinutes: -1 }, { maxSessions: 0.5, idleMinutes: 1e9 }, { maxSessions: 1e6 }]) {
 			writeFileSync(join(cwd, ".pi", "claude-sdk.json"), JSON.stringify(bad));
-			assert.deepEqual(resolveConfig({ cwd, agentDir, env: {} }), { pathToClaudeCodeExecutable: undefined }, `ignored: ${JSON.stringify(bad)}`);
+			assert.deepEqual(resolveConfig({ cwd, agentDir, env: {} }), { pathToClaudeCodeExecutable: undefined, promptMode: "claude" }, `ignored: ${JSON.stringify(bad)}`);
 		}
-		assert.deepEqual(resolveConfig({ cwd, agentDir, env: {} }), { pathToClaudeCodeExecutable: undefined }, "invalid project values are ignored");
+		assert.deepEqual(resolveConfig({ cwd, agentDir, env: {} }), { pathToClaudeCodeExecutable: undefined, promptMode: "claude" }, "invalid project values are ignored");
 		writeFileSync(join(agentDir, "claude-sdk.json"), JSON.stringify({ pathToClaudeCodeExecutable: "/opt/claude" }));
 		assert.equal(resolveConfig({ cwd, agentDir, env: {} }).pathToClaudeCodeExecutable, "/opt/claude");
 		assert.equal(resolveConfig({ cwd, agentDir, env: { PI_CLAUDE_SDK_CLAUDE_PATH: "/usr/bin/claude" } }).pathToClaudeCodeExecutable, "/usr/bin/claude");

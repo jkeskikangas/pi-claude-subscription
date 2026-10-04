@@ -63,7 +63,9 @@ export function childEnv(base: Record<string, string | undefined>, spec: Session
 		CLAUDE_CODE_USE_BEDROCK: undefined,
 		CLAUDE_CODE_USE_VERTEX: undefined,
 		CLAUDE_CODE_USE_FOUNDRY: undefined,
+		// Declare this process honestly as an Agent SDK app, even when pi itself runs inside Claude Code.
 		CLAUDECODE: undefined,
+		CLAUDE_CODE_ENTRYPOINT: undefined,
 		CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP,
 		// pi owns context management: no compaction, no output-size cap on tool results.
 		DISABLE_AUTO_COMPACT: "1",

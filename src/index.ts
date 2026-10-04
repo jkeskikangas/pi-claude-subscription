@@ -1,7 +1,8 @@
 import { appendFileSync } from "node:fs";
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir, getDocsPath, getExamplesPath, getReadmePath } from "@earendil-works/pi-coding-agent";
 import { resolveConfig } from "./config.ts";
 import { anthropicChatModels, claudeModels } from "./models.ts";
+import { applyClaudePrompt } from "./prompt.ts";
 import { API, ClaudeSdkProvider } from "./provider.ts";
 
 export const PROVIDER = "claude-sdk";
@@ -46,6 +47,9 @@ export default function (pi: ExtensionAPI) {
 			// The snapshot stays registered.
 		}
 	});
+
+	const docs = { readme: getReadmePath(), docs: getDocsPath(), examples: getExamplesPath() };
+	pi.on("before_agent_start", (event, ctx) => applyClaudePrompt(event, ctx.model, config.promptMode ?? "claude", docs));
 
 	pi.on("session_shutdown", () => provider.shutdown());
 	process.once("exit", () => provider.shutdown());

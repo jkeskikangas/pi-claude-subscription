@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 export interface Config {
 	pathToClaudeCodeExecutable?: string;
+	/** "claude" (default): a pi prompt prefix written for Claude. "pi": pi's default prompt. */
+	promptMode?: "claude" | "pi";
 	maxSessions?: number;
 	idleMinutes?: number;
 }
@@ -33,5 +35,6 @@ export function resolveConfig(where: { cwd: string; agentDir: string; env: Recor
 		...(validMaxSessions(project.maxSessions) ? { maxSessions: project.maxSessions } : {}),
 		...(validIdleMinutes(project.idleMinutes) ? { idleMinutes: project.idleMinutes } : {}),
 		pathToClaudeCodeExecutable: where.env.PI_CLAUDE_SDK_CLAUDE_PATH ?? global.pathToClaudeCodeExecutable,
+		promptMode: where.env.PI_CLAUDE_SDK_PROMPT === "pi" || (where.env.PI_CLAUDE_SDK_PROMPT === undefined && global.promptMode === "pi") ? "pi" : "claude",
 	};
 }

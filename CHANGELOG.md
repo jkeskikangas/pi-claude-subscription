@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 — 2026-10-04
+
+- **Add:** a Claude-tuned system prompt prefix for `claude-sdk` models. It is applied on pi's `before_agent_start`, keeps every tool and extension guideline plus pi's context files, skills and working directory, and never overrides a user's `SYSTEM.md`. Set `promptMode: "pi"` or `PI_CLAUDE_SDK_PROMPT=pi` for pi's default prompt.
+- **Fix:** the Claude Code child process no longer inherits `CLAUDE_CODE_ENTRYPOINT` or `CLAUDECODE` from a parent Claude Code session, so it always declares itself as an Agent SDK app.
+- **Bench:** every arm runs with a scrubbed environment (no API key, no inherited Claude Code identity). The proxy records Anthropic's unified rate-limit headers (billing route) per request. A `pi-default` arm uses pi's default prompt. Results before 0.2.0 were measured with an inherited Claude Code entrypoint; their billing routing was not representative, while token, time and correctness numbers are unaffected.
+
 ## 0.1.2 — 2026-10-04
 
 - **Security:** a project's `.pi/claude-sdk.json` can no longer set `pathToClaudeCodeExecutable`. pi reads that file without project trust, so an untrusted folder could pick the program to launch. The executable now comes only from the agent-directory config (pi's `getAgentDir()`) or `PI_CLAUDE_SDK_CLAUDE_PATH`. Project values for `maxSessions` (1–16) and `idleMinutes` (1–1440) must be integers.

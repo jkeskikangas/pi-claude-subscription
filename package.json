@@ -1,7 +1,7 @@
 {
   "name": "pi-claude-subscription",
-  "version": "0.1.2",
-  "description": "Use your Claude Pro/Max subscription in pi: Claude models through the Claude Agent SDK, with pi's own agent loop, tools and prompt.",
+  "version": "0.2.0",
+  "description": "Claude models in pi through the Claude Agent SDK on your Claude Pro/Max login, with pi's own agent loop and tools and a Claude-tuned prompt.",
   "keywords": [
     "pi-package",
     "pi",
@@ -38,7 +38,7 @@
     ]
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test --test-timeout 20000 test/unit.test.ts test/provider.test.ts",
+    "test": "node --experimental-strip-types --test --test-timeout 20000 test/unit.test.ts test/provider.test.ts test/prompt.test.ts",
     "test:live": "PI_CLAUDE_SDK_LIVE=1 node --experimental-strip-types --test --test-force-exit test/live.test.ts",
     "test:e2e": "for s in steer compact switch image; do node test/pi-e2e.mjs $s || exit 1; done",
     "typecheck": "tsc --noEmit -p .",

@@ -55,6 +55,23 @@ pi agent loop ──streamSimple──▶ provider ──streaming input──�
   generation and other non-essential traffic are disabled. The MCP output cap and tool timeout are
   lifted so pi's own truncation and timeouts apply.
 
+## System prompt
+
+For `claude-sdk` models the extension replaces pi's default prompt prefix with one written for
+Claude. It lists the selected tools and keeps every tool and prompt guideline that pi and other
+extensions contribute, adds Claude-oriented working rules (read before editing, parallel tool calls,
+verify, report faithfully) and points to pi's docs. pi's context files, skills and working directory
+are unchanged, and your own `SYSTEM.md` always wins.
+
+Set `"promptMode": "pi"` in the global `claude-sdk.json`, or `PI_CLAUDE_SDK_PROMPT=pi`, to keep pi's
+default prompt.
+
+**Billing.** Requests declare themselves honestly as Agent SDK traffic (`sdk-ts`). An inherited Claude
+Code entrypoint is always cleared. Observed on a Max plan on 2026-10-04: with the Claude prompt,
+requests ran within the plan's usage limits; with pi's default prompt, Anthropic answered `400 Third-party apps
+now draw from your extra usage`. Anthropic's routing can change; see their
+[Agent SDK plan article](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).
+
 ## Configuration
 
 Optional `claude-sdk.json` in pi's agent directory (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`):
