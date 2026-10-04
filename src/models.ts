@@ -1,19 +1,21 @@
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { CATALOG } from "./catalog.ts";
 
 type ProviderChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
-import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
+type CatalogModel = Pick<Model<Api>, "id" | "name" | "reasoning" | "input" | "cost" | "contextWindow" | "maxTokens" | "thinkingLevelMap">;
 
 /**
- * Chat models offered through Claude Code, with limits, prices and thinking levels taken from
- * pi's own Anthropic catalog so they track pi releases. Dated aliases are skipped; Claude Code
- * resolves the undated ids itself.
+ * Chat models offered through Claude Code. Limits, prices and thinking levels come from pi's
+ * Anthropic catalog: a snapshot at load (so `--model` works at startup), refreshed from pi's live
+ * registry once a session starts (see index.ts). Dated aliases are skipped; Claude Code resolves
+ * the undated ids itself.
  */
-export function claudeModels(): ProviderChatModelConfig[] {
-	const out: ProviderChatModelConfig[] = [];
-	for (const [id, m] of Object.entries(ANTHROPIC_MODELS as Record<string, any>)) {
-		if (/-\d{8}$/.test(id)) continue;
-		out.push({
-			id,
+export function claudeModels(source: readonly CatalogModel[] = CATALOG as unknown as CatalogModel[]): ProviderChatModelConfig[] {
+	return source
+		.filter((m) => !/-\d{8}$/.test(m.id))
+		.map((m) => ({
+			id: m.id,
 			name: `${m.name} (Claude subscription)`,
 			reasoning: m.reasoning,
 			input: m.input,
@@ -23,9 +25,7 @@ export function claudeModels(): ProviderChatModelConfig[] {
 			...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
 			// No promptCache: Claude Code already writes one-hour cache entries, and pi's cache
 			// warmer (a one-token replay of an earlier request) cannot be expressed through it.
-		});
-	}
-	return out;
+		}));
 }
 
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);

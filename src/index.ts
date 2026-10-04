@@ -38,14 +38,30 @@ export default function (pi: ExtensionAPI) {
 		debug: debugPath ? (msg) => appendFileSync(debugPath, `${new Date().toISOString()} ${msg}\n`) : undefined,
 	});
 
-	pi.registerProvider(PROVIDER, {
-		name: "Claude (subscription via Agent SDK)",
-		// Claude Code authenticates itself; pi only needs a non-empty key to treat the provider as configured.
-		apiKey: "claude-code-login",
-		api: API as any,
-		baseUrl: "claude-agent-sdk://local",
-		models: claudeModels(),
-		streamSimple: provider.streamSimple,
+	const register = (models = claudeModels()) =>
+		pi.registerProvider(PROVIDER, {
+			name: "Claude (subscription via Agent SDK)",
+			// Claude Code authenticates itself; pi only needs a non-empty key to treat the provider as configured.
+			apiKey: "claude-code-login",
+			api: API as any,
+			baseUrl: "claude-agent-sdk://local",
+			models,
+			streamSimple: provider.streamSimple,
+		});
+	register();
+
+	// Pick up Claude models newer than the bundled snapshot from pi's own catalog.
+	let refreshed = false;
+	pi.on("session_start", (_event, ctx) => {
+		if (refreshed) return;
+		refreshed = true;
+		try {
+			const live = ctx.modelRegistry.getAll().filter((m) => m.provider === "anthropic" && (m as { type?: string }).type !== "image");
+			const known = new Set(claudeModels().map((m) => m.id));
+			if (live.some((m) => !/-\d{8}$/.test(m.id) && !known.has(m.id))) register(claudeModels(live));
+		} catch {
+			// The snapshot stays registered.
+		}
 	});
 
 	pi.on("session_shutdown", () => provider.shutdown());

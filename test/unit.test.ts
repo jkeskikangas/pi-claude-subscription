@@ -134,6 +134,16 @@ describe("models", () => {
 	});
 });
 
+describe("packaging", () => {
+	it("imports pi packages only by their root: pi's extension loader aliases nothing else", () => {
+		const dir = join(import.meta.dirname ?? ".", "..", "src");
+		for (const f of readdirSync(dir)) {
+			const text = readFileSync(join(dir, f), "utf8");
+			assert.doesNotMatch(text, /from "@earendil-works\/pi-[a-z-]+\//, f);
+		}
+	});
+});
+
 describe("AsyncQueue", () => {
 	it("delivers in order, supports abort and close", async () => {
 		const q = new AsyncQueue<number>();
