@@ -1,5 +1,62 @@
 # Results: pi + pi-claude-subscription vs Claude Code
 
+## 0.2.0: Claude-tuned prompt, representative environment (2026-10-04)
+
+Every arm ran as from a plain terminal: no API key, and no Claude Code identity inherited from a
+parent session. The provider declares itself as an Agent SDK app (`sdk-ts`).
+
+| | pi + pi-claude-subscription 0.2.0 | Claude Code |
+|---|---:|---:|
+| tasks passed (11 tasks × 2, Sonnet 5.5 medium) | 22/22 | 22/22 |
+| median wall time | 8.7 s | 12.4 s |
+| input processed per run | 15.4k | 131.4k (8.6×) |
+| API-equivalent cost per run | $0.028 | $0.071 (2.6×) |
+
+**Billing route.** All 87 pi requests returned 200 within the plan's 5-hour usage window
+(`anthropic-ratelimit-unified-status: allowed`, no overage in use). On the same account and in the
+same environment, pi's *default* prompt (`promptMode: "pi"`) was answered with
+`400 Third-party apps now draw from your extra usage`.
+
+### Overall (claude-sonnet-5-5, effort medium, 11 tasks × 2 reps)
+
+| metric | pi | claude |
+|---|---:|---:|
+| tasks passed | 22/22 | 22/22 |
+| wall time, median (s) | 8.7 | 12.4 |
+| wall time, mean (s) | 11.6 | 12.9 |
+| API requests / run | 4.0 | 4.1 |
+| uncached input / run | 8 | 8 |
+| cache read / run | 11,740 | 123,126 |
+| cache write / run | 3,617 | 8,274 |
+| output / run | 1,092 | 1,325 |
+| input processed / run | 15,364 | 131,408 |
+| cache hit ratio | 76.5% | 93.5% |
+| API-equivalent cost / run | $0.0278 | $0.0710 |
+| models called | claude-sonnet-5-5 | claude-sonnet-5-5 |
+
+### Per task
+
+| task | pi pass | claude pass | pi wall s | claude wall s | pi cost | claude cost |
+|---|---:|---:|---:|---:|---:|---:|
+| csv-quotes | 2/2 | 2/2 | 7.2 | 9.6 | $0.0193 | $0.0593 |
+| duration-units | 2/2 | 2/2 | 5.1 | 6.4 | $0.0126 | $0.0485 |
+| lru-recency | 2/2 | 2/2 | 8.5 | 10.0 | $0.0171 | $0.0561 |
+| median | 2/2 | 2/2 | 6.1 | 10.4 | $0.0147 | $0.0510 |
+| pricing | 2/2 | 2/2 | 8.2 | 10.8 | $0.0220 | $0.0623 |
+| cli-json | 2/2 | 2/2 | 6.9 | 14.4 | $0.0213 | $0.0908 |
+| cli-low | 2/2 | 2/2 | 16.8 | 13.4 | $0.0310 | $0.0742 |
+| transfer | 2/2 | 2/2 | 15.4 | 14.3 | $0.0338 | $0.0709 |
+| reservations | 2/2 | 2/2 | 19.6 | 23.1 | $0.0568 | $0.1092 |
+| csv-rfc4180 | 2/2 | 2/2 | 14.8 | 14.6 | $0.0308 | $0.0712 |
+| cli-value | 2/2 | 2/2 | 18.5 | 15.1 | $0.0459 | $0.0875 |
+
+## Earlier results (0.1.x)
+
+The sections below were measured from inside a Claude Code session. That leaked Claude Code's CLI
+entrypoint into the provider (fixed in 0.2.0), so their **billing routing is not representative**.
+Their token, wall-time and correctness numbers do not depend on it and stand as measured.
+
+
 Measured 2026-10-04 with Claude Code 2.1.289 (Agent SDK 0.3.289) and pi 1.0.2, on the same Claude
 subscription account. Every request of every run went through `bench/proxy.mjs`, so the token
 numbers are the API's own `usage`, side calls included.
