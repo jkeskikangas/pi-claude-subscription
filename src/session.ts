@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { type Query, query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -24,14 +25,65 @@ export interface SessionSpec {
 	debug?: (msg: string) => void;
 }
 
+const CLIENT_APP = `pi-claude-subscription/${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version}`;
+
 type CallToolResult = { content: any[]; isError?: boolean };
+
+/** What the provider needs from a Claude Code session; LiveSession is the real one. */
+export interface ClaudeSession {
+	readonly spec: SessionSpec;
+	readonly sessionId: string;
+	readonly systemPrompt: string;
+	model: string;
+	chain: string;
+	count: number;
+	awaiting: Set<string>;
+	servedByClaude: Set<string>;
+	dead: boolean;
+	/** A provider call is reading this session's events; no other call may attach. */
+	busy: boolean;
+	lastUsed: number;
+	readonly events: AsyncQueue<SDKMessage>;
+	readonly exited: Promise<void>;
+	readonly stderr: string;
+	send(content: any[], priority?: "now" | "next" | "later"): void;
+	deliver(result: ToolResultMessage): void;
+	setModel(model: string): Promise<void>;
+	interrupt(): Promise<void>;
+	close(): void;
+}
+
+/** Environment for the Claude Code child process. */
+export function childEnv(base: Record<string, string | undefined>, spec: SessionSpec): Record<string, string | undefined> {
+	return {
+		...base,
+		// Subscription auth: no inherited key or cloud-provider switch may move Claude Code to API billing.
+		ANTHROPIC_API_KEY: undefined,
+		ANTHROPIC_AUTH_TOKEN: undefined,
+		CLAUDE_CODE_USE_BEDROCK: undefined,
+		CLAUDE_CODE_USE_VERTEX: undefined,
+		CLAUDE_CODE_USE_FOUNDRY: undefined,
+		CLAUDECODE: undefined,
+		CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP,
+		// pi owns context management: no compaction, no output-size cap on tool results.
+		DISABLE_AUTO_COMPACT: "1",
+		DISABLE_COMPACT: "1",
+		MAX_MCP_OUTPUT_TOKENS: "10000000",
+		MCP_TOOL_TIMEOUT: String(7 * 24 * 3600 * 1000),
+		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+		CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+		CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
+		...(spec.noCache ? { DISABLE_PROMPT_CACHING: "1" } : {}),
+		...(spec.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } : {}),
+	};
+}
 
 /**
  * One Claude Code process in streaming-input mode, holding one conversation. pi owns the agent
  * loop: Claude Code's tool calls reach pi's tools through an in-process MCP server whose
  * handlers park until pi delivers the tool results on its next provider call.
  */
-export class LiveSession {
+export class LiveSession implements ClaudeSession {
 	readonly spec: SessionSpec;
 	readonly sessionId: string;
 	readonly systemPrompt: string;
@@ -44,6 +96,7 @@ export class LiveSession {
 	/** Tool calls Claude Code answered itself (unknown tool names); pi's results for them are ignored. */
 	servedByClaude = new Set<string>();
 	dead = false;
+	busy = false;
 	lastUsed = Date.now();
 	readonly events = new AsyncQueue<SDKMessage>();
 	/** Resolves once the Claude Code process has exited. */
@@ -68,25 +121,6 @@ export class LiveSession {
 		});
 
 		const persist = spec.tools.length > 0;
-		const env: Record<string, string | undefined> = {
-			...process.env,
-			// Subscription auth: never let an inherited API key switch Claude Code to API billing.
-			ANTHROPIC_API_KEY: undefined,
-			ANTHROPIC_AUTH_TOKEN: undefined,
-			CLAUDECODE: undefined,
-			CLAUDE_AGENT_SDK_CLIENT_APP: "pi-claude-subscription/0.1.0",
-			// pi owns context management: no compaction, no output-size cap on tool results.
-			DISABLE_AUTO_COMPACT: "1",
-			DISABLE_COMPACT: "1",
-			MAX_MCP_OUTPUT_TOKENS: "10000000",
-			MCP_TOOL_TIMEOUT: String(7 * 24 * 3600 * 1000),
-			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-			CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-			CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
-			...(process.env.PI_CLAUDE_SDK_EXTRA_ENV ? JSON.parse(process.env.PI_CLAUDE_SDK_EXTRA_ENV) : {}),
-			...(spec.noCache ? { DISABLE_PROMPT_CACHING: "1" } : {}),
-			...(spec.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } : {}),
-		};
 
 		this.q = query({
 			prompt: this.input,
@@ -102,14 +136,14 @@ export class LiveSession {
 				settingSources: [],
 				strictMcpConfig: true,
 				includePartialMessages: true,
-				verbatimPrompts: process.env.PI_CLAUDE_SDK_VERBATIM !== "0",
+				verbatimPrompts: true,
 				persistSession: persist,
 				title: "pi",
 				thinking: spec.thinking,
 				...(spec.effort ? { effort: spec.effort } : {}),
 				...(spec.resume ? { resume: spec.resume.sessionId, resumeSessionAt: spec.resume.at } : { sessionId: this.sessionId }),
 				...(spec.pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable: spec.pathToClaudeCodeExecutable } : {}),
-				env,
+				env: childEnv(process.env, spec),
 				stderr: (d) => {
 					this.stderrTail = (this.stderrTail + d).slice(-2000);
 				},

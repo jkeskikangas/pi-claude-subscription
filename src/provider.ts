@@ -16,7 +16,7 @@ import { AnchorRegistry } from "./anchors.ts";
 import { findMessageUuid, synthesizeSession } from "./cc-sessions.ts";
 import { piToolName, readTranscript, type Transcript, type TurnMessage, userTurnBlocks, fingerprint } from "./convert.ts";
 import { thinkingOptions } from "./models.ts";
-import { errorText, LiveSession, type SessionSpec } from "./session.ts";
+import { type ClaudeSession, errorText, LiveSession, type SessionSpec } from "./session.ts";
 import { sha } from "./util.ts";
 
 export const API = "claude-agent-sdk";
@@ -30,15 +30,17 @@ export interface ProviderOptions {
 	registry?: AnchorRegistry;
 	debug?: (msg: string) => void;
 	cwd?: () => string;
+	/** Creates the Claude Code session; tests substitute a scripted fake. */
+	createSession?: (spec: SessionSpec, chain: string, count: number) => ClaudeSession;
 }
 
 /** How a request was attached to Claude Code; exposed for tests and the debug log. */
 export type Route = "live" | "resume" | "synth" | "fresh";
 
 export class ClaudeSdkProvider {
-	private sessions: LiveSession[] = [];
+	private sessions: ClaudeSession[] = [];
 	private readonly registry: AnchorRegistry;
-	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "debug">> & ProviderOptions;
+	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "debug" | "createSession">> & ProviderOptions;
 	private timer?: NodeJS.Timeout;
 	lastRoute?: Route;
 
@@ -68,7 +70,7 @@ export class ClaudeSdkProvider {
 	}
 
 	private async run(model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, stream: AssistantMessageEventStream, output: AssistantMessage): Promise<void> {
-		let session: LiveSession | undefined;
+		let session: ClaudeSession | undefined;
 		let started = false;
 		const fail = (reason: "error" | "aborted", message: string) => {
 			output.stopReason = reason;
@@ -155,6 +157,7 @@ export class ClaudeSdkProvider {
 			if (session) this.drop(session);
 			fail(options?.signal?.aborted ? "aborted" : "error", errorText(e, session?.stderr));
 		} finally {
+			if (session) session.busy = false;
 			this.scheduleSweep();
 		}
 	}
@@ -164,18 +167,19 @@ export class ClaudeSdkProvider {
 	 * a live process that has consumed a prefix of it; a persisted Claude Code session resumed
 	 * at the longest known prefix; a synthesized session; a fresh one.
 	 */
-	private async attach(t: Transcript, spec: SessionSpec): Promise<{ session: LiveSession; prefix: number; route: Route }> {
+	private async attach(t: Transcript, spec: SessionSpec): Promise<{ session: ClaudeSession; prefix: number; route: Route }> {
 		const n = t.messages.length;
 		for (const s of this.sessions) {
-			if (s.dead || s.systemPrompt !== t.systemPrompt || s.spec.toolsHash !== t.toolsHash || s.spec.thinkingKey !== spec.thinkingKey) continue;
+			if (s.dead || s.busy || s.systemPrompt !== t.systemPrompt || s.spec.toolsHash !== t.toolsHash || s.spec.thinkingKey !== spec.thinkingKey) continue;
 			if (s.count > n || t.chain[s.count] !== s.chain) continue;
 			const tail = t.messages.slice(s.count);
 			if (tail.some((m) => m.role === "assistant")) continue;
 			const resultIds = new Set(tail.filter((m): m is ToolResultMessage => m.role === "toolResult").map((m) => m.toolCallId));
 			if (s.awaiting.size > 0 && ![...s.awaiting].every((id) => resultIds.has(id))) continue;
 			if (s.awaiting.size === 0 && [...resultIds].some((id) => !s.servedByClaude.has(id))) continue;
-			if (s.model !== spec.model) await s.setModel(spec.model);
+			s.busy = true; // before any await, so a concurrent call cannot select it too
 			s.lastUsed = Date.now();
+			if (s.model !== spec.model) await s.setModel(spec.model);
 			return { session: s, prefix: s.count, route: "live" };
 		}
 
@@ -187,6 +191,8 @@ export class ClaudeSdkProvider {
 			if (t.messages[k - 1].role !== "assistant") continue;
 			const a = this.registry.get(t.chain[k]);
 			if (!a || a.cwd !== spec.cwd) continue;
+			// Another call is mid-response on that session; resuming would end it.
+			if (this.sessions.some((s) => s.busy && s.sessionId === a.sessionId)) continue;
 			// A live process on that session is stale by now. It must be gone before we resume:
 			// Claude Code resumes a session that is still open as a copy, without its context
 			// attachments, which changes the prompt prefix and loses the cache.
@@ -213,7 +219,9 @@ export class ClaudeSdkProvider {
 				route = "synth";
 			}
 		}
-		const session = new LiveSession({ ...spec, resume }, t.chain[prefix], prefix);
+		const create = this.opts.createSession ?? ((sp, chain, count) => new LiveSession(sp, chain, count));
+		const session = create({ ...spec, resume }, t.chain[prefix], prefix);
+		session.busy = true;
 		this.sessions.push(session);
 		this.evict();
 		return { session, prefix, route };
@@ -224,7 +232,7 @@ export class ClaudeSdkProvider {
 	 * Returns the API message id, "aborted", or an error.
 	 */
 	private async readStep(
-		session: LiveSession,
+		session: ClaudeSession,
 		model: Model<Api>,
 		options: SimpleStreamOptions | undefined,
 		stream: AssistantMessageEventStream,
@@ -237,6 +245,13 @@ export class ClaudeSdkProvider {
 		let started = false;
 		let messageId: string | undefined;
 		let stopReason: string | undefined;
+		// A turn can span several API responses: Claude Code continues on its own after an output
+		// limit, an empty response or a cut-off stream. They fold into one pi message.
+		let inResponse = false;
+		let responseStart = 0;
+		let turnStop: StopReason | undefined;
+		const finished = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+		let current = { ...finished };
 		const start = () => {
 			if (started) return;
 			started = true;
@@ -245,12 +260,20 @@ export class ClaudeSdkProvider {
 		};
 		const setUsage = (u: any) => {
 			if (!u) return;
-			if (u.input_tokens != null) output.usage.input = u.input_tokens;
-			if (u.output_tokens != null) output.usage.output = u.output_tokens;
-			if (u.cache_read_input_tokens != null) output.usage.cacheRead = u.cache_read_input_tokens;
-			if (u.cache_creation_input_tokens != null) output.usage.cacheWrite = u.cache_creation_input_tokens;
-			if (u.cache_creation?.ephemeral_1h_input_tokens != null) output.usage.cacheWrite1h = u.cache_creation.ephemeral_1h_input_tokens;
-			output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+			if (u.input_tokens != null) current.input = u.input_tokens;
+			if (u.output_tokens != null) current.output = u.output_tokens;
+			if (u.cache_read_input_tokens != null) current.cacheRead = u.cache_read_input_tokens;
+			if (u.cache_creation_input_tokens != null) current.cacheWrite = u.cache_creation_input_tokens;
+			if (u.cache_creation?.ephemeral_1h_input_tokens != null) current.cacheWrite1h = u.cache_creation.ephemeral_1h_input_tokens;
+			output.usage.input = finished.input + current.input;
+			output.usage.output = finished.output + current.output;
+			output.usage.cacheRead = finished.cacheRead + current.cacheRead;
+			output.usage.cacheWrite = finished.cacheWrite + current.cacheWrite;
+			const w1h = finished.cacheWrite1h + current.cacheWrite1h;
+			if (w1h > 0) output.usage.cacheWrite1h = w1h;
+			// pi reads totalTokens as the context size (compaction, footer): that of the latest response,
+			// not the sum over a folded turn. The other fields sum, so cost stays right.
+			output.usage.totalTokens = current.input + current.cacheRead + current.cacheWrite + current.output;
 			output.usage.cost = calculateCost(model, output.usage);
 		};
 		const onAbort = () => void session.interrupt();
@@ -271,8 +294,12 @@ export class ClaudeSdkProvider {
 					await options?.onProviderStreamEvent?.(ev, model);
 					switch (ev.type) {
 						case "message_start":
-							// Claude Code retried a response that failed mid-stream: keep only the retry.
-							if (blocks.length > 0) blocks.length = 0;
+							// The previous response broke off mid-stream and Claude Code retried it: drop its partial blocks.
+							if (inResponse) blocks.length = responseStart;
+							responseStart = blocks.length;
+							inResponse = true;
+							current = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+							stopReason = undefined;
 							messageId = ev.message.id;
 							output.responseId = ev.message.id;
 							output.responseModel = ev.message.model;
@@ -340,15 +367,30 @@ export class ClaudeSdkProvider {
 							break;
 						case "message_stop":
 							for (const b of blocks) delete b.index;
-							output.stopReason = mapStop(stopReason);
-							return { ok: true, messageId };
+							inResponse = false;
+							Object.assign(finished, {
+								input: finished.input + current.input,
+								output: finished.output + current.output,
+								cacheRead: finished.cacheRead + current.cacheRead,
+								cacheWrite: finished.cacheWrite + current.cacheWrite,
+								cacheWrite1h: finished.cacheWrite1h + current.cacheWrite1h,
+							});
+							current = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+							turnStop = mapStop(stopReason);
+							output.stopReason = turnStop;
+							// A tool call hands control to pi. Any other stop may still be followed by Claude
+							// Code's own continuation, so the turn ends only at its result.
+							if (turnStop === "toolUse") return { ok: true, messageId };
+							break;
 					}
 				} else if (m.type === "assistant" && m.error && !started) {
 					const text = (m.message?.content ?? []).map((c: any) => c.text ?? "").join("");
 					return { ok: false, error: text || `Claude Code error: ${m.error}` };
-				} else if (m.type === "result" && (m.is_error || m.subtype !== "success")) {
-					// Success results close turns whose last response was already streamed; only failures matter.
-					return { ok: false, error: (m.errors ?? []).join("\n") || m.result || `Claude Code ${m.subtype}` };
+				} else if (m.type === "result") {
+					if (m.is_error || m.subtype !== "success") return { ok: false, error: (m.errors ?? []).join("\n") || m.result || `Claude Code ${m.subtype}` };
+					output.stopReason = turnStop ?? "stop";
+					start();
+					return { ok: true, messageId };
 				}
 			}
 		} finally {
@@ -358,7 +400,7 @@ export class ClaudeSdkProvider {
 
 	private closing = new Map<string, Promise<void>>();
 
-	private drop(s: LiveSession): void {
+	private drop(s: ClaudeSession): void {
 		s.close();
 		this.sessions = this.sessions.filter((x) => x !== s);
 		const exited = s.exited.finally(() => {
@@ -375,17 +417,16 @@ export class ClaudeSdkProvider {
 	private evict(): void {
 		const live = this.sessions.filter((s) => !s.dead);
 		this.sessions = live;
-		while (this.sessions.length > this.opts.maxSessions) {
-			const oldest = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed)[0];
-			this.drop(oldest);
-		}
+		// Busy sessions are never evicted, so the pool may briefly exceed maxSessions.
+		const idle = this.sessions.filter((s) => !s.busy).sort((a, b) => a.lastUsed - b.lastUsed);
+		while (this.sessions.length > this.opts.maxSessions && idle.length > 0) this.drop(idle.shift()!);
 	}
 
 	private scheduleSweep(): void {
 		if (this.timer) return;
 		this.timer = setInterval(() => {
 			const now = Date.now();
-			for (const s of [...this.sessions]) if (s.awaiting.size === 0 && now - s.lastUsed > this.opts.idleMs) this.drop(s);
+			for (const s of [...this.sessions]) if (!s.busy && s.awaiting.size === 0 && now - s.lastUsed > this.opts.idleMs) this.drop(s);
 			if (this.sessions.length === 0 && this.timer) {
 				clearInterval(this.timer);
 				this.timer = undefined;

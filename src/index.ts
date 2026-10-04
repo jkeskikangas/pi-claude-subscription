@@ -1,27 +1,10 @@
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { claudeModels } from "./models.ts";
+import { appendFileSync } from "node:fs";
+import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { resolveConfig } from "./config.ts";
+import { anthropicChatModels, claudeModels } from "./models.ts";
 import { API, ClaudeSdkProvider } from "./provider.ts";
 
 export const PROVIDER = "claude-sdk";
-
-interface Config {
-	pathToClaudeCodeExecutable?: string;
-	maxSessions?: number;
-	idleMinutes?: number;
-}
-
-function readConfig(): Config {
-	for (const file of [join(process.cwd(), ".pi", "claude-sdk.json"), join(homedir(), ".pi", "agent", "claude-sdk.json")]) {
-		if (!existsSync(file)) continue;
-		try {
-			return JSON.parse(readFileSync(file, "utf8"));
-		} catch {}
-	}
-	return {};
-}
 
 /**
  * pi extension: Claude models through the Claude Agent SDK, authenticated by the local Claude
@@ -29,10 +12,10 @@ function readConfig(): Config {
  * Claude Code is used only as the authenticated model transport.
  */
 export default function (pi: ExtensionAPI) {
-	const config = readConfig();
+	const config = resolveConfig({ cwd: process.cwd(), agentDir: getAgentDir(), env: process.env });
 	const debugPath = process.env.PI_CLAUDE_SDK_DEBUG;
 	const provider = new ClaudeSdkProvider({
-		pathToClaudeCodeExecutable: config.pathToClaudeCodeExecutable ?? process.env.PI_CLAUDE_SDK_CLAUDE_PATH,
+		pathToClaudeCodeExecutable: config.pathToClaudeCodeExecutable,
 		maxSessions: config.maxSessions,
 		idleMs: config.idleMinutes ? config.idleMinutes * 60_000 : undefined,
 		debug: debugPath ? (msg) => appendFileSync(debugPath, `${new Date().toISOString()} ${msg}\n`) : undefined,
@@ -56,7 +39,7 @@ export default function (pi: ExtensionAPI) {
 		if (refreshed) return;
 		refreshed = true;
 		try {
-			const live = ctx.modelRegistry.getAll().filter((m) => m.provider === "anthropic" && (m as { type?: string }).type !== "image");
+			const live = anthropicChatModels(ctx.modelRegistry.getAll());
 			const known = new Set(claudeModels().map((m) => m.id));
 			if (live.some((m) => !/-\d{8}$/.test(m.id) && !known.has(m.id))) register(claudeModels(live));
 		} catch {

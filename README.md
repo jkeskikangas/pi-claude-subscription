@@ -15,8 +15,9 @@ On the bundled benchmark it matches Claude Code's task success, processes 5–10
 and costs about half as much (API-equivalent). See [bench/RESULTS.md](bench/RESULTS.md).
 
 Requirements: pi ≥ 1.0 and a logged-in Claude Code (`claude` → `/login`). The extension uses Claude
-Code's own login. It never reads pi's credentials, and it removes `ANTHROPIC_API_KEY` from the Claude
-Code environment so a stray key can't switch you to API billing.
+Code's own login. It never reads pi's credentials. It also removes `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` and the Bedrock/Vertex/Foundry switches from Claude Code's environment, so
+none of them can move you to API billing.
 
 ## How it works
 
@@ -56,11 +57,15 @@ pi agent loop ──streamSimple──▶ provider ──streaming input──�
 
 ## Configuration
 
-Optional `~/.pi/agent/claude-sdk.json` (or `.pi/claude-sdk.json` in a project):
+Optional `claude-sdk.json` in pi's agent directory (`~/.pi/agent`, or `$PI_CODING_AGENT_DIR`):
 
 ```json
 { "pathToClaudeCodeExecutable": "/opt/homebrew/bin/claude", "maxSessions": 3, "idleMinutes": 20 }
 ```
+
+A project's `.pi/claude-sdk.json` can set `maxSessions` and `idleMinutes` only. pi reads that file
+before you grant project trust, so a project cannot choose which program runs.
+`PI_CLAUDE_SDK_CLAUDE_PATH` overrides the executable path.
 
 - `PI_CLAUDE_SDK_DEBUG=/path/log`: routing decisions (`live` / `resume` / `synth` / `fresh`).
 - Thinking levels map to Claude effort (`low` … `max`) on adaptive-thinking models and to thinking
@@ -70,7 +75,9 @@ Optional `~/.pi/agent/claude-sdk.json` (or `.pi/claude-sdk.json` in a project):
 
 ## Tests
 
-- `npm test`: offline unit tests.
+- `npm test`: offline tests. They cover the helpers, plus event translation and routing against a
+  scripted fake Claude Code session: tool loop, Claude Code's own continuations, mid-stream retry,
+  abort, errors, live/resume/synth routing and the busy guard.
 - `npm run test:live`: the provider against real Claude Code: tool loop, multi-turn, restart
   resume, abort recovery, foreign history, tool-less requests. With `PROXY=http://127.0.0.1:8787`
   it also asserts cache hits.

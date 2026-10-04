@@ -28,6 +28,11 @@ export function claudeModels(source: readonly CatalogModel[] = CATALOG as unknow
 		}));
 }
 
+/** pi's Anthropic models that can back this provider. */
+export function anthropicChatModels(models: readonly (CatalogModel & { provider: string; type?: string })[]): CatalogModel[] {
+	return models.filter((m) => m.provider === "anthropic" && (m.type === undefined || m.type === "chat"));
+}
+
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 /**
