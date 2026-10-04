@@ -1,0 +1,49 @@
+[
+  {
+    "id": "csv-quotes",
+    "prompt": "CSV import of stock movements breaks when a quoted field contains doubled quotes, e.g. the line `A1,3,\"said \"\"hi\"\"\"` should give the note `said \"hi\"`. Fix the parser."
+  },
+  {
+    "id": "duration-units",
+    "prompt": "parseDuration in src/duration.js is documented to support d (days) and w (weeks) but rejects them. Make it match its documentation."
+  },
+  {
+    "id": "lru-recency",
+    "prompt": "Our price cache sometimes evicts entries that were just read. Reading an entry should count as using it. Fix the LRU cache so get() refreshes recency."
+  },
+  {
+    "id": "median",
+    "prompt": "median() in src/stats.js gives wrong answers, e.g. median([1, 2, 3, 4]) should be 2.5 and median([10, 9, 2]) should be 9. Fix it."
+  },
+  {
+    "id": "pricing",
+    "prompt": "Two pricing bugs: (1) the bulk discount should apply when qty >= minQty, as the doc comment says, but at exactly minQty it doesn't; (2) priceFor caches by sku and qty only, so calling it with different rules returns stale prices. Fix both without removing the cache."
+  },
+  {
+    "id": "cli-json",
+    "prompt": "Add a --json flag to `stockroom report` (src/cli.js). With it, print the stock as a JSON array of {sku, name, qty} objects sorted by sku instead of the text table. The flag may appear anywhere after `report`. Keep the existing behaviour without the flag."
+  },
+  {
+    "id": "cli-low",
+    "prompt": "Add a `low` command to the CLI: `stockroom low <items.csv> <threshold> [movements.csv]` prints the SKUs whose quantity (after applying movements, if given) is below the threshold, one per line, sorted. Exit code 0. Update the usage line too."
+  },
+  {
+    "id": "transfer",
+    "prompt": "Add a transfer(fromSku, toSku, qty, note) method to Inventory that moves qty units from one SKU to another atomically: if either SKU is unknown or stock is insufficient, throw and change nothing. It records two history entries (negative for the source, positive for the target), both with the note. Add tests for it."
+  },
+  {
+    "id": "reservations",
+    "hard": true,
+    "prompt": "Add stock reservations to Inventory. reserve(sku, qty, holdFor) takes a duration string like \"15m\" (use parseDuration from src/duration.js), returns a reservation id, and throws if the SKU is unknown or not enough unreserved stock is available. available(sku) is the quantity minus active reservations. release(id) cancels a reservation. Reservations expire after their hold time; for testability the constructor takes an optional options object { now } (a function returning milliseconds, default Date.now). move() must not take stock below the reserved quantity. Keep existing behaviour otherwise and add tests."
+  },
+  {
+    "id": "csv-rfc4180",
+    "hard": true,
+    "prompt": "Make CSV parsing in src/csv.js RFC 4180 compliant: quoted fields may contain commas, doubled quotes (\"\" for a literal quote) and line breaks; records may be separated by \\n or \\r\\n; blank lines between records are skipped. parseMovements must keep working on top of it."
+  },
+  {
+    "id": "cli-value",
+    "hard": true,
+    "prompt": "Add a `value` command to the CLI: `stockroom value <items.csv> <prices.csv> [movements.csv]`. prices.csv has the header `sku,unit,bulkMinQty,bulkPercentOff`; unit is a decimal euro amount like 1.50 (convert with toCents); the bulk columns may be empty for no bulk rule. Print `Total stock value: <amount>` using the existing money formatting, where each item's value is priceFor(rules, sku, qty) for its quantity after movements. Exit code 0."
+  }
+]

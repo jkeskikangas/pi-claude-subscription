@@ -1,0 +1,63 @@
+{
+  "name": "pi-claude-subscription",
+  "version": "0.1.0",
+  "description": "Use your Claude Pro/Max subscription in pi: Claude models through the Claude Agent SDK, with pi's own agent loop, tools and prompt.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "provider",
+    "claude",
+    "claude-code",
+    "claude-agent-sdk",
+    "anthropic"
+  ],
+  "license": "MIT",
+  "author": "Jarno Keskikangas",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jkeskikangas/pi-claude-subscription.git"
+  },
+  "homepage": "https://github.com/jkeskikangas/pi-claude-subscription#readme",
+  "bugs": {
+    "url": "https://github.com/jkeskikangas/pi-claude-subscription/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/unit.test.ts",
+    "test:live": "PI_CLAUDE_SDK_LIVE=1 node --experimental-strip-types --test --test-force-exit test/live.test.ts",
+    "test:e2e": "for s in steer compact switch image; do node test/pi-e2e.mjs $s || exit 1; done",
+    "typecheck": "tsc --noEmit -p .",
+    "bench": "node bench/run.mjs",
+    "bench:report": "node bench/report.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.289",
+    "@modelcontextprotocol/sdk": "^1.32.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=1.0.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.0.2",
+    "@earendil-works/pi-coding-agent": "^1.0.2",
+    "@types/node": "^26.6.4",
+    "typebox": "^1.3.34",
+    "typescript": "^7.0.2"
+  }
+}

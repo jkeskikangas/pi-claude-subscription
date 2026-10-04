@@ -1,0 +1,53 @@
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { claudeModels } from "./models.ts";
+import { API, ClaudeSdkProvider } from "./provider.ts";
+
+export const PROVIDER = "claude-sdk";
+
+interface Config {
+	pathToClaudeCodeExecutable?: string;
+	maxSessions?: number;
+	idleMinutes?: number;
+}
+
+function readConfig(): Config {
+	for (const file of [join(process.cwd(), ".pi", "claude-sdk.json"), join(homedir(), ".pi", "agent", "claude-sdk.json")]) {
+		if (!existsSync(file)) continue;
+		try {
+			return JSON.parse(readFileSync(file, "utf8"));
+		} catch {}
+	}
+	return {};
+}
+
+/**
+ * pi extension: Claude models through the Claude Agent SDK, authenticated by the local Claude
+ * Code login (Pro/Max subscription). pi keeps its own agent loop, tools, prompt and compaction;
+ * Claude Code is used only as the authenticated model transport.
+ */
+export default function (pi: ExtensionAPI) {
+	const config = readConfig();
+	const debugPath = process.env.PI_CLAUDE_SDK_DEBUG;
+	const provider = new ClaudeSdkProvider({
+		pathToClaudeCodeExecutable: config.pathToClaudeCodeExecutable ?? process.env.PI_CLAUDE_SDK_CLAUDE_PATH,
+		maxSessions: config.maxSessions,
+		idleMs: config.idleMinutes ? config.idleMinutes * 60_000 : undefined,
+		debug: debugPath ? (msg) => appendFileSync(debugPath, `${new Date().toISOString()} ${msg}\n`) : undefined,
+	});
+
+	pi.registerProvider(PROVIDER, {
+		name: "Claude (subscription via Agent SDK)",
+		// Claude Code authenticates itself; pi only needs a non-empty key to treat the provider as configured.
+		apiKey: "claude-code-login",
+		api: API as any,
+		baseUrl: "claude-agent-sdk://local",
+		models: claudeModels(),
+		streamSimple: provider.streamSimple,
+	});
+
+	pi.on("session_shutdown", () => provider.shutdown());
+	process.once("exit", () => provider.shutdown());
+}

@@ -1,0 +1,7 @@
+{
+  "name": "stockroom",
+  "version": "1.2.0",
+  "type": "module",
+  "description": "Tiny inventory library used as a coding-agent benchmark fixture.",
+  "scripts": { "test": "node --test" }
+}

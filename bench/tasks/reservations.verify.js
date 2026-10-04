@@ -1,0 +1,34 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { Inventory } from "../src/inventory.js";
+test("verify: reservations", () => {
+	let t = 1_000_000;
+	const inv = new Inventory({ now: () => t });
+	inv.addItem("A", "a", 10);
+	assert.equal(inv.available("A"), 10);
+	const r1 = inv.reserve("A", 4, "15m");
+	assert.equal(inv.available("A"), 6);
+	assert.equal(inv.quantity("A"), 10);
+	assert.throws(() => inv.reserve("A", 7, "1h"));
+	assert.throws(() => inv.reserve("Z", 1, "1h"));
+	assert.throws(() => inv.move("A", -7));
+	inv.move("A", -6);
+	assert.equal(inv.quantity("A"), 4);
+	assert.equal(inv.available("A"), 0);
+	t += 15 * 60_000 + 1;
+	assert.equal(inv.available("A"), 4);
+	const r2 = inv.reserve("A", 3, "1h");
+	assert.notEqual(r1, r2);
+	inv.release(r2);
+	assert.equal(inv.available("A"), 4);
+	const plain = new Inventory();
+	plain.addItem("B", "b", 2);
+	assert.equal(plain.available("B"), 2);
+	plain.reserve("B", 1, "1h");
+	assert.equal(plain.available("B"), 1);
+});
+test("verify: agent added reservation tests", () => {
+	const dir = new URL(".", import.meta.url);
+	assert.ok(readdirSync(dir).filter((f) => f.endsWith(".js") && !f.startsWith("zz_verify")).some((f) => /reserve/.test(readFileSync(new URL(f, dir), "utf8"))));
+});
