@@ -21,11 +21,21 @@ none of them can move you to API billing.
 
 ## How it works
 
-```
-pi agent loop ──streamSimple──▶ provider ──streaming input──▶ Claude Code process (one per conversation)
-      ▲                              │                               │  custom system prompt = pi's prompt
-      │ toolCall events              │◀── raw API stream events ─────┤  tools = pi's tools via in-process MCP
-      └── pi runs the tool ──────────┴── tool result releases the parked MCP call
+```mermaid
+sequenceDiagram
+    participant L as pi agent loop
+    participant P as provider
+    participant C as Claude Code process<br/>(one per conversation)
+    Note over C: system prompt = pi's prompt<br/>tools = pi's tools via in-process MCP
+    L->>P: streamSimple
+    P->>C: streaming input
+    C-->>P: raw API stream events
+    P-->>L: toolCall events
+    Note over C: MCP call parked
+    L->>L: pi runs the tool
+    L->>P: streamSimple (tool result)
+    P->>C: tool result releases the parked MCP call
+    C-->>P: stream continues
 ```
 
 - **pi's prompt and tools, not Claude Code's.** The Claude Code process runs with
