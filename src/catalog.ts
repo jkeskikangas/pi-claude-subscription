@@ -62,6 +62,41 @@ export const CATALOG = [
 		"maxTokens": 64000
 	},
 	{
+		"id": "claude-haiku-5-5",
+		"name": "Claude Haiku 5.5",
+		"reasoning": true,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 0.1,
+			"output": 0.5,
+			"cacheRead": 0.01,
+			"cacheWrite": 0.125,
+			"tiers": [
+				{
+					"inputTokensAbove": 100000,
+					"input": 0.5,
+					"output": 2.5,
+					"cacheRead": 0.05,
+					"cacheWrite": 0.625
+				}
+			]
+		},
+		"contextWindow": 1000000,
+		"maxTokens": 128000,
+		"thinkingLevelMap": {
+			"off": null,
+			"minimal": null,
+			"low": "low",
+			"medium": "medium",
+			"high": "high",
+			"xhigh": "xhigh",
+			"max": "max"
+		}
+	},
+	{
 		"id": "claude-opus-4-5",
 		"name": "Claude Opus 4.5 (latest)",
 		"reasoning": true,

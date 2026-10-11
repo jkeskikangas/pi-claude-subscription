@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 — 2026-10-11
+
+- **Add:** `claude-haiku-5-5` in the bundled model snapshot, regenerated from pi 1.1.0's Anthropic catalog. pi checks `enabledModels` and `--model` against the snapshot at startup, before the session-start refresh, so listing the model there no longer warns "No models match pattern".
+
 ## 0.2.0 — 2026-10-04
 
 - **Add:** a Claude-tuned system prompt prefix for `claude-sdk` models. It is applied on pi's `before_agent_start`, keeps every tool and extension guideline plus pi's context files, skills and working directory, and never overrides a user's `SYSTEM.md`. Set `promptMode: "pi"` or `PI_CLAUDE_SDK_PROMPT=pi` for pi's default prompt.
