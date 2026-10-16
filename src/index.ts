@@ -17,8 +17,8 @@ export default function (pi: ExtensionAPI) {
 	const debugPath = process.env.PI_CLAUDE_SDK_DEBUG;
 	const provider = new ClaudeSdkProvider({
 		pathToClaudeCodeExecutable: config.pathToClaudeCodeExecutable,
-		maxSessions: config.maxSessions,
-		idleMs: config.idleMinutes ? config.idleMinutes * 60_000 : undefined,
+		...(config.maxSessions ? { maxSessions: config.maxSessions } : {}),
+		...(config.idleMinutes ? { idleMs: config.idleMinutes * 60_000 } : {}),
 		debug: debugPath ? (msg) => appendFileSync(debugPath, `${new Date().toISOString()} ${msg}\n`) : undefined,
 	});
 

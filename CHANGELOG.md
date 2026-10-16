@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3 — 2026-10-16
+
+- **Fix:** the idle sweep no longer kills in-flight calls when `idleMinutes` is unconfigured. The extension passed `idleMs: undefined`, which overwrote the 20-minute default; every comparison against `undefined` is false, so each 60-second sweep closed whatever session was mid-response (reported as "Claude Code exited unexpectedly"). The provider now ignores explicitly-undefined options, and the extension only passes options that are set. Regression-tested with the extension's unconfigured option shape.
+
 ## 0.2.2 — 2026-10-16
 
 - **Fix:** Claude Code processes no longer accumulate. A long pi session had hundreds of idle `claude` children, each still connected. The provider now tracks every process it starts, pooled or not, and keeps at most `maxSessions` running outside in-flight calls (least recently used close first). A failed model switch on a reused session closes it instead of leaving it marked busy. The idle sweep also ends a call that has had no event from Claude Code for `idleMinutes`, and `shutdown` closes every tracked process.

@@ -107,12 +107,13 @@ class FakeSession implements ClaudeSession {
 	}
 }
 
-function harness(script: object[][], registry = new AnchorRegistry(join(mkdtempSync(join(tmpdir(), "anch-")), "a.jsonl"))) {
+function harness(script: object[][], registry = new AnchorRegistry(join(mkdtempSync(join(tmpdir(), "anch-")), "a.jsonl")), opts: object = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
 	const created: FakeSession[] = [];
 	const provider = new ClaudeSdkProvider({
 		registry,
 		cwd: () => cwd,
+		...opts,
 		createSession: (spec, chain, count) => {
 			const s = new FakeSession(spec, chain, count, script);
 			created.push(s);
@@ -354,6 +355,17 @@ describe("process lifetime", () => {
 		for (let i = 0; i < 6; i++) await h.call([user(`other ${i}`)]);
 		assert.equal(h.created[0].dead, true);
 		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("an undefined idleMs (the extension's unconfigured shape) never sweeps an in-flight call", async () => {
+		const h = harness([[]], undefined, { idleMs: undefined });
+		const ac = new AbortController();
+		const pending = h.call([user("silent")], ac.signal);
+		await new Promise((r) => setTimeout(r, 10));
+		h.provider.sweep(Date.now() + 60_000);
+		assert.equal(h.created[0].dead, false, "the sweep left the in-flight session running");
+		ac.abort();
+		await pending;
 	});
 
 	it("the idle sweep ends a call that Claude Code stopped answering", async () => {

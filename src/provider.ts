@@ -50,7 +50,11 @@ export class ClaudeSdkProvider {
 
 	constructor(opts: ProviderOptions = {}) {
 		this.registry = opts.registry ?? new AnchorRegistry();
-		this.opts = { maxSessions: 3, idleMs: 20 * 60_000, cwd: () => process.cwd(), ...opts };
+		// An option explicitly set to undefined means "not configured": it must not overwrite a
+		// default. (The extension once passed idleMs: undefined that way, and every idle-sweep
+		// comparison against undefined is false, so the sweep closed in-flight sessions.)
+		const given = Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined));
+		this.opts = { maxSessions: 3, idleMs: 20 * 60_000, cwd: () => process.cwd(), ...given };
 	}
 
 	readonly streamSimple = (model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions): AssistantMessageEventStream => {
