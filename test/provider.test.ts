@@ -315,6 +315,66 @@ describe("busy sessions", () => {
 	});
 });
 
+describe("process lifetime", () => {
+	const reply = (id: string) => [...apiMessage(id, [{ text: id }], "end_turn"), result];
+	const running = (h: ReturnType<typeof harness>) => h.created.filter((s) => !s.dead).length;
+
+	it("a failed model switch closes the session instead of leaving it busy", async () => {
+		const h = harness([reply("m1"), reply("m2")]);
+		const a1 = await h.call([user("one")]);
+		h.created[0].setModel = async () => {
+			throw new Error("switch failed");
+		};
+		const opus = { ...model, id: "claude-opus-5-5" } as Model<any>;
+		const failed = (await h.provider.streamSimple(opus, normalizeContext({ systemPrompt: SYSTEM, tools, messages: [user("one"), a1.msg, user("two")] }), { reasoning: "medium" as any }).result()) as AssistantMessage;
+		assert.equal(failed.stopReason, "error");
+		assert.equal(h.created[0].dead, true, "the session was closed");
+		assert.equal(h.created[0].busy, false);
+		const again = await h.call([user("one"), a1.msg, user("two")]);
+		assert.equal(text(again.msg), "m2");
+	});
+
+	it("many conversations never leave more than maxSessions processes running", async () => {
+		const h = harness(Array.from({ length: 40 }, (_, i) => reply(`m${i}`)));
+		for (let i = 0; i < 40; i++) await h.call([user(`conversation ${i}`)]);
+		assert.equal(h.created.length, 40);
+		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("concurrent calls (parallel samples) are bounded once they finish", async () => {
+		const h = harness(Array.from({ length: 30 }, (_, i) => reply(`m${i}`)));
+		for (let round = 0; round < 10; round++) await Promise.all([0, 1, 2].map((k) => h.call([user(`round ${round} sample ${k}`)])));
+		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("a session whose busy flag outlived its call is still closed", async () => {
+		const h = harness(Array.from({ length: 10 }, (_, i) => reply(`m${i}`)));
+		await h.call([user("stuck")]);
+		h.created[0].busy = true; // as if a path forgot to release it
+		for (let i = 0; i < 6; i++) await h.call([user(`other ${i}`)]);
+		assert.equal(h.created[0].dead, true);
+		assert.ok(running(h) <= 3, `${running(h)} processes still running`);
+	});
+
+	it("the idle sweep ends a call that Claude Code stopped answering", async () => {
+		const h = harness([[]]);
+		const pending = h.call([user("silent")]);
+		await new Promise((r) => setTimeout(r, 10));
+		h.provider.sweep(Date.now() + 21 * 60_000);
+		const r = await pending;
+		assert.equal(r.msg.stopReason, "error");
+		assert.equal(running(h), 0);
+	});
+
+	it("shutdown closes every process, pooled or not", async () => {
+		const h = harness(Array.from({ length: 5 }, (_, i) => reply(`m${i}`)));
+		for (let i = 0; i < 5; i++) await h.call([user(`c${i}`)]);
+		(h.provider as any).sessions = []; // a path that lost track of the pool
+		h.provider.shutdown();
+		assert.equal(running(h), 0);
+	});
+});
+
 describe("configuration (F1)", () => {
 	it("takes the Claude Code executable only from the agent directory or the environment", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "proj-"));

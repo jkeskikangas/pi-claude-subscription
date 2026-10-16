@@ -39,6 +39,10 @@ export type Route = "live" | "resume" | "synth" | "fresh";
 
 export class ClaudeSdkProvider {
 	private sessions: ClaudeSession[] = [];
+	/** Every session whose process may still run, pooled or not: the leak backstop closes from here. */
+	private readonly all = new Set<ClaudeSession>();
+	/** Sessions a provider call is reading right now (not the `busy` flag, which a failed attach could leave set). */
+	private readonly active = new Set<ClaudeSession>();
 	private readonly registry: AnchorRegistry;
 	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "debug" | "createSession">> & ProviderOptions;
 	private timer?: NodeJS.Timeout;
@@ -157,7 +161,10 @@ export class ClaudeSdkProvider {
 			if (session) this.drop(session);
 			fail(options?.signal?.aborted ? "aborted" : "error", errorText(e, session?.stderr));
 		} finally {
-			if (session) session.busy = false;
+			if (session) {
+				session.busy = false;
+				this.active.delete(session);
+			}
 			this.scheduleSweep();
 		}
 	}
@@ -178,8 +185,19 @@ export class ClaudeSdkProvider {
 			if (s.awaiting.size > 0 && ![...s.awaiting].every((id) => resultIds.has(id))) continue;
 			if (s.awaiting.size === 0 && [...resultIds].some((id) => !s.servedByClaude.has(id))) continue;
 			s.busy = true; // before any await, so a concurrent call cannot select it too
+			this.active.add(s);
 			s.lastUsed = Date.now();
-			if (s.model !== spec.model) await s.setModel(spec.model);
+			if (s.model !== spec.model) {
+				try {
+					await s.setModel(spec.model);
+				} catch (e) {
+					// run() never receives this session, so nothing else would release it.
+					s.busy = false;
+					this.active.delete(s);
+					this.drop(s);
+					throw e;
+				}
+			}
 			return { session: s, prefix: s.count, route: "live" };
 		}
 
@@ -222,7 +240,9 @@ export class ClaudeSdkProvider {
 		const create = this.opts.createSession ?? ((sp, chain, count) => new LiveSession(sp, chain, count));
 		const session = create({ ...spec, resume }, t.chain[prefix], prefix);
 		session.busy = true;
+		this.active.add(session);
 		this.sessions.push(session);
+		this.track(session);
 		this.evict();
 		return { session, prefix, route };
 	}
@@ -283,6 +303,7 @@ export class ClaudeSdkProvider {
 				let m: any;
 				try {
 					m = await session.events.next(signal);
+					session.lastUsed = Date.now();
 				} catch {
 					this.drop(session);
 					return "aborted";
@@ -414,20 +435,29 @@ export class ClaudeSdkProvider {
 		if (p) await Promise.race([p, new Promise((r) => setTimeout(r, 10_000).unref())]);
 	}
 
+	private track(s: ClaudeSession): void {
+		this.all.add(s);
+		void s.exited.then(() => this.all.delete(s));
+	}
+
 	private evict(): void {
 		const live = this.sessions.filter((s) => !s.dead);
 		this.sessions = live;
-		// Busy sessions are never evicted, so the pool may briefly exceed maxSessions.
-		const idle = this.sessions.filter((s) => !s.busy).sort((a, b) => a.lastUsed - b.lastUsed);
+		// Sessions in a provider call are never evicted, so the pool may briefly exceed maxSessions.
+		const idle = this.sessions.filter((s) => !this.active.has(s)).sort((a, b) => a.lastUsed - b.lastUsed);
 		while (this.sessions.length > this.opts.maxSessions && idle.length > 0) this.drop(idle.shift()!);
+		// Backstop: a process that left the pool without being closed, or a session whose busy flag
+		// outlived its call, is closed once more than maxSessions processes run outside provider calls.
+		const pooled = (s: ClaudeSession) => (this.sessions.includes(s) ? 1 : 0);
+		const stray = [...this.all].filter((s) => !s.dead && !this.active.has(s)).sort((a, b) => pooled(a) - pooled(b) || a.lastUsed - b.lastUsed);
+		while (stray.length > this.opts.maxSessions) this.drop(stray.shift()!);
 	}
 
 	private scheduleSweep(): void {
 		if (this.timer) return;
 		this.timer = setInterval(() => {
-			const now = Date.now();
-			for (const s of [...this.sessions]) if (!s.busy && s.awaiting.size === 0 && now - s.lastUsed > this.opts.idleMs) this.drop(s);
-			if (this.sessions.length === 0 && this.timer) {
+			this.sweep();
+			if (this.all.size === 0 && this.timer) {
 				clearInterval(this.timer);
 				this.timer = undefined;
 			}
@@ -435,8 +465,19 @@ export class ClaudeSdkProvider {
 		this.timer.unref();
 	}
 
+	/** Close processes idle longer than idleMs. */
+	sweep(now = Date.now()): void {
+		for (const s of [...this.all]) {
+			if (now - s.lastUsed <= this.opts.idleMs) continue;
+			// A pooled session parked on tool calls waits for pi's results; anything else idle goes,
+			// including a call that has had no event from Claude Code for that long (its reader then ends).
+			if (!this.active.has(s) && this.sessions.includes(s) && s.awaiting.size > 0) continue;
+			this.drop(s);
+		}
+	}
+
 	shutdown(): void {
-		for (const s of [...this.sessions]) this.drop(s);
+		for (const s of new Set([...this.sessions, ...this.all])) this.drop(s);
 	}
 }
 

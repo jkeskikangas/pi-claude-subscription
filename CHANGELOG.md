@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 — 2026-10-16
+
+- **Fix:** Claude Code processes no longer accumulate. A long pi session had hundreds of idle `claude` children, each still connected. The provider now tracks every process it starts, pooled or not, and keeps at most `maxSessions` running outside in-flight calls (least recently used close first). A failed model switch on a reused session closes it instead of leaving it marked busy. The idle sweep also ends a call that has had no event from Claude Code for `idleMinutes`, and `shutdown` closes every tracked process.
+
 ## 0.2.1 — 2026-10-11
 
 - **Add:** `claude-haiku-5-5` in the bundled model snapshot, regenerated from pi 1.1.0's Anthropic catalog. pi checks `enabledModels` and `--model` against the snapshot at startup, before the session-start refresh, so listing the model there no longer warns "No models match pattern".
