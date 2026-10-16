@@ -33,9 +33,9 @@ export function sessionFile(cwd: string, sessionId: string): string | undefined 
 }
 
 /**
- * The uuid of the last transcript entry Claude Code wrote for API message `messageId`
- * (it stores one entry per content block). Resuming there keeps everything up to and
- * including that assistant message.
+ * Legacy-anchor fallback: the uuid of the last transcript entry Claude Code wrote for API
+ * message `messageId` (it stores one entry per content block). New anchors capture this uuid
+ * from the SDK stream instead; this scan serves anchors persisted before that was possible.
  */
 export function findMessageUuid(cwd: string, sessionId: string, messageId: string): string | undefined {
 	const file = sessionFile(cwd, sessionId);

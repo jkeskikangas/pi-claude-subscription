@@ -12,6 +12,7 @@ import type {
 	TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { calculateCost, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { forkSession as forkSdkSession } from "@anthropic-ai/claude-agent-sdk";
 import { AnchorRegistry } from "./anchors.ts";
 import { findMessageUuid, synthesizeSession } from "./cc-sessions.ts";
 import { piToolName, readTranscript, type Transcript, type TurnMessage, userTurnBlocks, fingerprint } from "./convert.ts";
@@ -32,6 +33,8 @@ export interface ProviderOptions {
 	cwd?: () => string;
 	/** Creates the Claude Code session; tests substitute a scripted fake. */
 	createSession?: (spec: SessionSpec, chain: string, count: number) => ClaudeSession;
+	/** Forks a persisted Claude Code session at a transcript-entry uuid; tests substitute a fake. */
+	forkSession?: (sessionId: string, cwd: string, at: string) => Promise<{ sessionId: string }>;
 }
 
 /** How a request was attached to Claude Code; exposed for tests and the debug log. */
@@ -44,7 +47,7 @@ export class ClaudeSdkProvider {
 	/** Sessions a provider call is reading right now (not the `busy` flag, which a failed attach could leave set). */
 	private readonly active = new Set<ClaudeSession>();
 	private readonly registry: AnchorRegistry;
-	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "debug" | "createSession">> & ProviderOptions;
+	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "debug" | "createSession" | "forkSession">> & ProviderOptions;
 	private timer?: NodeJS.Timeout;
 	lastRoute?: Route;
 
@@ -154,7 +157,8 @@ export class ClaudeSdkProvider {
 			session.chain = sha(`${session.chain}\0${fingerprint(output)}`);
 			session.count += 1;
 			if (step.messageId && session.spec.tools.length > 0) {
-				this.registry.put(session.chain, { sessionId: session.sessionId, messageId: step.messageId, cwd: session.spec.cwd });
+				const entryUuid = await session.entryUuid(step.messageId);
+				this.registry.put(session.chain, { sessionId: session.sessionId, messageId: step.messageId, cwd: session.spec.cwd, ...(entryUuid ? { entryUuid } : {}) });
 			}
 			session.awaiting = new Set(output.content.filter((c): c is ToolCall => c.type === "toolCall").map((c) => c.id));
 			if (output.stopReason !== "toolUse") session.awaiting.clear();
@@ -206,7 +210,7 @@ export class ClaudeSdkProvider {
 		}
 
 		// Longest prefix ending in an assistant message that Claude Code has on disk.
-		let resume: { sessionId: string; at: string } | undefined;
+		let resume: { sessionId: string; at?: string } | undefined;
 		let prefix = 0;
 		let route: Route = "fresh";
 		for (let k = n - 1; k >= 1 && spec.tools.length > 0; k--) {
@@ -215,17 +219,22 @@ export class ClaudeSdkProvider {
 			if (!a || a.cwd !== spec.cwd) continue;
 			// Another call is mid-response on that session; resuming would end it.
 			if (this.sessions.some((s) => s.busy && s.sessionId === a.sessionId)) continue;
-			// A live process on that session is stale by now. It must be gone before we resume:
-			// Claude Code resumes a session that is still open as a copy, without its context
-			// attachments, which changes the prompt prefix and loses the cache.
-			for (const s of this.sessions) if (s.sessionId === a.sessionId) this.drop(s);
-			await this.waitExited(a.sessionId);
-			const at = findMessageUuid(a.cwd, a.sessionId, a.messageId);
+			const at = a.entryUuid ?? findMessageUuid(a.cwd, a.sessionId, a.messageId);
 			if (!at) {
 				this.log(`anchor ${a.sessionId}/${a.messageId} not found on disk`);
 				continue;
 			}
+			// A live process on that session is stale by now. It must be gone before the
+			// transcript is forked: Claude Code may still be writing its final entries.
+			for (const s of this.sessions) if (s.sessionId === a.sessionId) this.drop(s);
+			await this.waitExited(a.sessionId);
 			resume = { sessionId: a.sessionId, at };
+			try {
+				const forked = await (this.opts.forkSession ?? forkPersistedSession)(a.sessionId, spec.cwd, at);
+				if (forked.sessionId && forked.sessionId !== a.sessionId) resume = { sessionId: forked.sessionId };
+			} catch (e) {
+				this.log(`fork anchor ${a.sessionId}/${a.messageId} failed (${errorText(e)}); resuming source session`);
+			}
 			prefix = k;
 			route = "resume";
 			break;
@@ -483,6 +492,10 @@ export class ClaudeSdkProvider {
 	shutdown(): void {
 		for (const s of new Set([...this.sessions, ...this.all])) this.drop(s);
 	}
+}
+
+async function forkPersistedSession(sessionId: string, cwd: string, at: string): Promise<{ sessionId: string }> {
+	return forkSdkSession(sessionId, { dir: cwd, upToMessageId: at, title: "pi" });
 }
 
 function mapStop(reason: string | undefined): StopReason {

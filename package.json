@@ -1,6 +1,6 @@
 {
   "name": "pi-claude-subscription",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Claude models in pi through the Claude Agent SDK on your Claude Pro/Max login, with pi's own agent loop and tools and a Claude-tuned prompt.",
   "keywords": [
     "pi-package",

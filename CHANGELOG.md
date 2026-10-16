@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4 — 2026-10-16
+
+- **Change:** divergence now uses the Agent SDK's native session operations. Claude Code sessions record the transcript-entry uuid streamed with each assistant message, anchors persist that uuid, and a diverged or restarted conversation is copied with `forkSession` up to the anchored entry before the fork is resumed — instead of resuming the source session at a uuid found by scanning Claude Code's transcript files. Anchors persisted by older versions still resolve through that scan, and if forking fails the provider falls back to resuming the source session at the anchor.
+
 ## 0.2.3 — 2026-10-16
 
 - **Fix:** the idle sweep no longer kills in-flight calls when `idleMinutes` is unconfigured. The extension passed `idleMs: undefined`, which overwrote the 20-minute default; every comparison against `undefined` is false, so each 60-second sweep closed whatever session was mid-response (reported as "Claude Code exited unexpectedly"). The provider now ignores explicitly-undefined options, and the extension only passes options that are set. Regression-tested with the extension's unconfigured option shape.

@@ -6,12 +6,15 @@ import { dirname, join } from "node:path";
  * Where a conversation state lives in Claude Code's own session files: after the assistant
  * message `messageId` of session `sessionId`. Keyed by the pi transcript chain hash, so a pi
  * session that diverges from a live Claude Code process (abort, branch, restart) resumes the
- * exact bytes Claude Code sent before and keeps its prompt cache.
+ * exact bytes Claude Code sent before and keeps its prompt cache. `entryUuid` is the Claude
+ * Code transcript-entry uuid streamed with that message; anchors written before it was
+ * captured carry only the API message id and are resolved by scanning the transcript.
  */
 export interface Anchor {
 	sessionId: string;
 	messageId: string;
 	cwd: string;
+	entryUuid?: string;
 }
 
 const MAX_ENTRIES = 20_000;
@@ -34,8 +37,8 @@ export class AnchorRegistry {
 		for (const line of lines) {
 			if (!line) continue;
 			try {
-				const { k, s, m, c } = JSON.parse(line);
-				this.map.set(k, { sessionId: s, messageId: m, cwd: c });
+				const { k, s, m, c, u } = JSON.parse(line);
+				this.map.set(k, { sessionId: s, messageId: m, cwd: c, ...(typeof u === "string" ? { entryUuid: u } : {}) });
 			} catch {}
 		}
 		if (lines.length > MAX_ENTRIES * 2) this.compact();
@@ -66,5 +69,5 @@ export class AnchorRegistry {
 }
 
 function line(k: string, a: Anchor): string {
-	return `${JSON.stringify({ k, s: a.sessionId, m: a.messageId, c: a.cwd })}\n`;
+	return `${JSON.stringify({ k, s: a.sessionId, m: a.messageId, c: a.cwd, ...(a.entryUuid ? { u: a.entryUuid } : {}) })}\n`;
 }

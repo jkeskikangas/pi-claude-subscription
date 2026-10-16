@@ -115,8 +115,8 @@ describe("synthesizeSession", () => {
 describe("AnchorRegistry", () => {
 	it("persists anchors across instances", () => {
 		const file = join(mkdtempSync(join(tmpdir(), "anch-")), "a.jsonl");
-		new AnchorRegistry(file).put("k1", { sessionId: "s", messageId: "m", cwd: "/x" });
-		assert.deepEqual(new AnchorRegistry(file).get("k1"), { sessionId: "s", messageId: "m", cwd: "/x" });
+		new AnchorRegistry(file).put("k1", { sessionId: "s", messageId: "m", cwd: "/x", entryUuid: "u" });
+		assert.deepEqual(new AnchorRegistry(file).get("k1"), { sessionId: "s", messageId: "m", cwd: "/x", entryUuid: "u" });
 		assert.equal(new AnchorRegistry(file).get("nope"), undefined);
 	});
 });

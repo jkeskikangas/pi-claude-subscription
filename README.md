@@ -49,13 +49,14 @@ sequenceDiagram
 - **Steering is native.** A message you type while a tool runs is queued in Claude Code before the
   tool results are released, so the model sees it at that tool boundary as Claude Code's own
   "user sent a message while you were working" notice.
-- **Divergence resumes Claude Code's own transcript.** pi's history can stop matching the live
+- **Divergence forks Claude Code's own transcript.** pi's history can stop matching the live
   process after an abort, `/tree` navigation, a fork, a thinking-level change or a pi restart. The
   provider then looks up the longest matching prefix in an anchor registry (pi transcript hash →
-  Claude Code session and message) and resumes that session with `resumeSessionAt`. Claude Code
-  replays its own bytes, so the prompt cache still hits. A resume waits for the old process to exit
-  first: resuming a session that is still open makes Claude Code fork a copy without its context
-  attachments, which changes the prefix.
+  Claude Code session and message), using the transcript-entry uuid streamed with that assistant
+  message, and calls the Agent SDK's `forkSession` to copy the transcript up to that entry before
+  resuming the fork. Claude Code replays its own bytes, so the prompt cache still hits. The old
+  process exits before the fork reads its transcript. Anchors persisted by older versions have no
+  streamed uuid; their entry uuid is resolved from Claude Code's transcript file as a fallback.
 - **Foreign history is synthesized.** Turns from other providers, a compacted session, or a session
   from before the extension was installed are written as a Claude Code transcript (tool ids
   sanitized, cross-model thinking dropped) and resumed.

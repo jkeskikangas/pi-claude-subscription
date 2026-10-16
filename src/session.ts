@@ -19,8 +19,8 @@ export interface SessionSpec {
 	maxOutputTokens?: number;
 	/** pi asked for no prompt caching (cacheRetention "none"). */
 	noCache?: boolean;
-	/** Resume this Claude Code session, cut after `at`. Omit for a fresh session. */
-	resume?: { sessionId: string; at: string };
+	/** Resume this Claude Code session, cut after `at` when given. Omit for a fresh session. */
+	resume?: { sessionId: string; at?: string };
 	pathToClaudeCodeExecutable?: string;
 	debug?: (msg: string) => void;
 }
@@ -48,6 +48,8 @@ export interface ClaudeSession {
 	readonly stderr: string;
 	send(content: any[], priority?: "now" | "next" | "later"): void;
 	deliver(result: ToolResultMessage): void;
+	/** Transcript-entry uuid streamed for an API assistant message; waits briefly for its final SDK frame. */
+	entryUuid(messageId: string): Promise<string | undefined>;
 	setModel(model: string): Promise<void>;
 	interrupt(): Promise<void>;
 	close(): void;
@@ -109,6 +111,9 @@ export class LiveSession implements ClaudeSession {
 	private readonly input = new AsyncQueue<SDKUserMessage>();
 	private readonly parked = new Map<string, { resolve: (r: CallToolResult) => void; reject: (e: Error) => void }>();
 	private readonly ready = new Map<string, CallToolResult>();
+	/** Last transcript-entry uuid streamed for each top-level API assistant message. */
+	private readonly assistantEntries = new Map<string, string>();
+	private readonly entryWaiters = new Map<string, Set<(uuid: string | undefined) => void>>();
 	private stderrTail = "";
 
 	constructor(spec: SessionSpec, chain: string, count: number) {
@@ -143,7 +148,7 @@ export class LiveSession implements ClaudeSession {
 				title: "pi",
 				thinking: spec.thinking,
 				...(spec.effort ? { effort: spec.effort } : {}),
-				...(spec.resume ? { resume: spec.resume.sessionId, resumeSessionAt: spec.resume.at } : { sessionId: this.sessionId }),
+				...(spec.resume ? { resume: spec.resume.sessionId, ...(spec.resume.at ? { resumeSessionAt: spec.resume.at } : {}) } : { sessionId: this.sessionId }),
 				...(spec.pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable: spec.pathToClaudeCodeExecutable } : {}),
 				env: childEnv(process.env, spec),
 				stderr: (d) => {
@@ -178,6 +183,8 @@ export class LiveSession implements ClaudeSession {
 	private async pump(): Promise<void> {
 		try {
 			for await (const m of this.q) {
+				const sdkMessage = m as any;
+				if (sdkMessage.type === "assistant" && !sdkMessage.parent_tool_use_id && sdkMessage.message?.id && sdkMessage.uuid) this.rememberEntry(sdkMessage.message.id, sdkMessage.uuid);
 				if (m.type === "user" && !m.parent_tool_use_id && Array.isArray(m.message.content)) {
 					// A tool_result Claude Code produced without asking pi (e.g. an unknown tool name).
 					for (const b of m.message.content as any[]) {
@@ -190,11 +197,40 @@ export class LiveSession implements ClaudeSession {
 			this.events.push({ type: "pi_error", error: errorText(e, this.stderrTail) } as any);
 		} finally {
 			this.dead = true;
+			for (const messageId of [...this.entryWaiters.keys()]) this.settleEntryWaiters(messageId, undefined);
 			this.events.close();
 			for (const p of this.parked.values()) p.reject(new Error("Claude Code session ended"));
 			this.parked.clear();
 			this.markExited();
 		}
+	}
+
+	private rememberEntry(messageId: string, uuid: string): void {
+		this.assistantEntries.set(messageId, uuid);
+		this.settleEntryWaiters(messageId, uuid);
+	}
+
+	private settleEntryWaiters(messageId: string, uuid: string | undefined): void {
+		const waiters = this.entryWaiters.get(messageId);
+		if (!waiters) return;
+		this.entryWaiters.delete(messageId);
+		for (const resolve of waiters) resolve(uuid);
+	}
+
+	async entryUuid(messageId: string): Promise<string | undefined> {
+		const known = this.assistantEntries.get(messageId);
+		if (known || this.dead) return known;
+		return new Promise((resolve) => {
+			const done = (uuid: string | undefined) => {
+				clearTimeout(timer);
+				resolve(uuid ?? this.assistantEntries.get(messageId));
+			};
+			const timer = setTimeout(() => this.settleEntryWaiters(messageId, undefined), 500);
+			timer.unref?.();
+			const waiters = this.entryWaiters.get(messageId) ?? new Set<(uuid: string | undefined) => void>();
+			waiters.add(done);
+			this.entryWaiters.set(messageId, waiters);
+		});
 	}
 
 	private delivered = new Set<string>();

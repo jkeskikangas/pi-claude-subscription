@@ -82,8 +82,13 @@ class FakeSession implements ClaudeSession {
 		this.count = count;
 		this.exited = new Promise((r) => (this.markExited = r));
 	}
+	private readonly entryUuids = new Map<string, string>();
 	private reply(): void {
-		for (const e of this.script.shift() ?? []) this.events.push(e);
+		for (const e of this.script.shift() ?? []) {
+			const sdkMessage = e as any;
+			if (sdkMessage.type === "assistant" && !sdkMessage.parent_tool_use_id && sdkMessage.message?.id && sdkMessage.uuid) this.entryUuids.set(sdkMessage.message.id, sdkMessage.uuid);
+			this.events.push(e);
+		}
 	}
 	send(content: any[]): void {
 		this.sent.push(content);
@@ -96,6 +101,9 @@ class FakeSession implements ClaudeSession {
 	}
 	async setModel(m: string) {
 		this.model = m;
+	}
+	async entryUuid(messageId: string) {
+		return this.entryUuids.get(messageId);
 	}
 	async interrupt() {
 		this.interrupted = true;
@@ -110,9 +118,14 @@ class FakeSession implements ClaudeSession {
 function harness(script: object[][], registry = new AnchorRegistry(join(mkdtempSync(join(tmpdir(), "anch-")), "a.jsonl")), opts: object = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
 	const created: FakeSession[] = [];
+	const forkCalls: { sessionId: string; cwd: string; at: string }[] = [];
 	const provider = new ClaudeSdkProvider({
 		registry,
 		cwd: () => cwd,
+		forkSession: async (sessionId: string, forkCwd: string, at: string) => {
+			forkCalls.push({ sessionId, cwd: forkCwd, at });
+			return { sessionId: `fork-${sessionId}` };
+		},
 		...opts,
 		createSession: (spec, chain, count) => {
 			const s = new FakeSession(spec, chain, count, script);
@@ -125,7 +138,7 @@ function harness(script: object[][], registry = new AnchorRegistry(join(mkdtempS
 		const msg = (await s.result()) as AssistantMessage;
 		return { msg, route: provider.lastRoute };
 	};
-	return { provider, created, call, cwd, registry };
+	return { provider, created, call, cwd, registry, forkCalls };
 }
 
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 1 });
@@ -229,16 +242,52 @@ describe("event translation", () => {
 // ---- Routing ----------------------------------------------------------------------------------
 
 describe("routing", () => {
-	it("resumes Claude Code's own transcript at the anchor after a restart", async () => {
+	it("forks Claude Code's transcript at a legacy anchor after a restart", async () => {
 		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), result]]);
 		const hist: Message[] = [user("one")];
 		const a1 = await h.call(hist);
 		h.provider.shutdown();
-		// What Claude Code would have persisted for that session.
+		// What Claude Code would have persisted for that session. This anchor predates streamed
+		// uuid capture, so its entry uuid is resolved from the transcript file.
 		const sid = h.created[0].sessionId;
 		mkdirSync(projectDir(h.cwd), { recursive: true });
 		writeFileSync(join(projectDir(h.cwd), `${sid}.jsonl`), `${JSON.stringify({ type: "assistant", uuid: "uuid-A", isSidechain: false, message: { id: "msg_A" } })}\n`);
 		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry);
+		(h2 as any).provider.opts.cwd = () => h.cwd;
+		hist.push(a1.msg, user("two"));
+		const a2 = await h2.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(h2.forkCalls, [{ sessionId: sid, cwd: h.cwd, at: "uuid-A" }]);
+		assert.deepEqual(h2.created[0].spec.resume, { sessionId: `fork-${sid}` });
+		assert.equal(text(a2.msg), "second");
+	});
+
+	it("forks at the uuid streamed with the assistant message, without reading its transcript", async () => {
+		const streamedAssistant = { type: "assistant", uuid: "uuid-streamed", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), streamedAssistant, result]]);
+		const hist: Message[] = [user("one")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		const sid = h.created[0].sessionId;
+		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry);
+		(h2 as any).provider.opts.cwd = () => h.cwd;
+		hist.push(a1.msg, user("two"));
+		const a2 = await h2.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(h2.forkCalls, [{ sessionId: sid, cwd: h.cwd, at: "uuid-streamed" }]);
+		assert.deepEqual(h2.created[0].spec.resume, { sessionId: `fork-${sid}` });
+		assert.equal(text(a2.msg), "second");
+	});
+
+	it("falls back to resuming the source session when forking its transcript fails", async () => {
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), result]]);
+		const hist: Message[] = [user("one")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		const sid = h.created[0].sessionId;
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(join(projectDir(h.cwd), `${sid}.jsonl`), `${JSON.stringify({ type: "assistant", uuid: "uuid-A", isSidechain: false, message: { id: "msg_A" } })}\n`);
+		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry, { forkSession: async () => { throw new Error("fork unavailable"); } });
 		(h2 as any).provider.opts.cwd = () => h.cwd;
 		hist.push(a1.msg, user("two"));
 		const a2 = await h2.call(hist);
