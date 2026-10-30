@@ -215,6 +215,9 @@ export class ClaudeSdkProvider {
 		let route: Route = "fresh";
 		for (let k = n - 1; k >= 1 && spec.tools.length > 0; k--) {
 			if (t.messages[k - 1].role !== "assistant") continue;
+			// Only the last assistant message can anchor a resume: the tail is sent as one user turn, so
+			// a later assistant turn (another model's, after a switch back) would be lost. Synthesize instead.
+			if (t.messages.slice(k).some((m) => m.role === "assistant")) break;
 			const a = this.registry.get(t.chain[k]);
 			if (!a || a.cwd !== spec.cwd) continue;
 			// Another call is mid-response on that session; resuming would end it.

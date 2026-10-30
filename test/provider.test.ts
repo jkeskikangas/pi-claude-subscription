@@ -144,6 +144,16 @@ function harness(script: object[][], registry = new AnchorRegistry(join(mkdtempS
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 1 });
 const toolResult = (id: string, text: string): Message => ({ role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text }], isError: false, timestamp: 1 });
 const text = (m: AssistantMessage) => m.content.map((c: any) => c.text ?? "").join("");
+const foreignAssistant = (content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"]): AssistantMessage => ({
+	role: "assistant",
+	content,
+	api: "openai-responses",
+	provider: "openai",
+	model: "gpt",
+	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	stopReason,
+	timestamp: 1,
+});
 
 // ---- Event translation ----------------------------------------------------------------------
 
@@ -303,6 +313,44 @@ describe("routing", () => {
 		assert.equal(a.route, "synth");
 		assert.ok(h.created[0].spec.resume?.at);
 		assert.deepEqual(h.created[0].sent[0], [{ type: "text", text: "continue" }]);
+	});
+
+	it("sends the current system prompt after a mid-session switch from another provider", async () => {
+		const h = harness([[...apiMessage("m", [{ text: "ok" }], "end_turn"), result]]);
+		const ctx = normalizeContext({ tools, messages: [user("hello"), foreignAssistant([{ type: "text", text: "hi from gpt" }], "stop")] });
+		// pi's default prompt leads the session; switching to a claude-sdk model replaces the preamble.
+		Object.assign(ctx.messages[0], { sections: { preamble: "<pi default prompt>", cwd: "<cwd>" } });
+		ctx.messages.push({ role: "system", content: "", sections: { preamble: "<claude prompt>" }, timestamp: 2 }, user("continue"));
+		const a = (await h.provider.streamSimple(model, ctx, { reasoning: "medium" as any }).result()) as AssistantMessage;
+		assert.equal(text(a), "ok");
+		assert.equal(h.provider.lastRoute, "synth");
+		const prompt = h.created[0].spec.systemPrompt;
+		assert.ok(prompt.includes("<claude prompt>") && prompt.includes("<cwd>"), prompt);
+		assert.ok(!prompt.includes("<pi default prompt>"), "pi's default prompt is not what Claude Code sends");
+		assert.deepEqual(h.created[0].sent[0], [{ type: "text", text: "continue" }], "the prompt change is not repeated as a reminder");
+	});
+
+	it("synthesizes, instead of resuming past them, another provider's turns after a switch back", async () => {
+		const streamedAssistant = { type: "assistant", uuid: "uuid-A", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness([[...apiMessage("msg_A", [{ text: "first" }], "end_turn"), streamedAssistant, result]]);
+		const a1 = await h.call([user("one")]);
+		h.provider.shutdown();
+		const h2 = harness([[...apiMessage("msg_B", [{ text: "second" }], "end_turn"), result]], h.registry);
+		(h2 as any).provider.opts.cwd = () => h.cwd;
+		const hist: Message[] = [
+			user("one"),
+			a1.msg,
+			user("two"),
+			foreignAssistant([{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "x" } }], "toolUse"),
+			toolResult("call_1", "x contents"),
+			foreignAssistant([{ type: "text", text: "x says hi" }], "stop"),
+			user("three"),
+		];
+		const a2 = await h2.call(hist);
+		assert.equal(a2.route, "synth", "the anchor before the other provider's turns is not resumed");
+		assert.deepEqual(h2.forkCalls, []);
+		assert.deepEqual(h2.created[0].sent[0], [{ type: "text", text: "three" }], "no orphaned tool result reaches Claude Code");
+		assert.equal(text(a2.msg), "second");
 	});
 
 	it("never attaches a second concurrent request to a busy session (F4)", async () => {
