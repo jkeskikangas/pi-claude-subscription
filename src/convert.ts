@@ -9,7 +9,7 @@ import type {
 	TranscriptContext,
 	UserMessage,
 } from "@earendil-works/pi-ai";
-import { getCurrentTools, getInitialSystemMessage, getSystemMessageText, renderSystemMessageUpdate, toToolDeclaration } from "@earendil-works/pi-ai";
+import { collapseSystemMessages, getCurrentTools, getInitialSystemMessage, getSystemMessageText, renderSystemMessageUpdate, toToolDeclaration } from "@earendil-works/pi-ai";
 import { sha, stableStringify } from "./util.ts";
 
 export const MCP_SERVER = "pi";
@@ -34,12 +34,16 @@ export interface Transcript {
  * built-in Anthropic provider does, together with tool results that answer their calls.
  */
 export function readTranscript(context: TranscriptContext): Transcript {
-	const leading = getInitialSystemMessage(context.messages);
+	// Claude Code gets the current system prompt, not the leading one. After a mid-session switch to
+	// a claude-sdk model the Claude prompt arrives as a later system message; left as a reminder, the
+	// request would carry pi's default prompt and Anthropic would bill it as extra usage.
+	const all = collapseSystemMessages(context).messages;
+	const leading = getInitialSystemMessage(all);
 	const systemPrompt = leading ? getSystemMessageText(leading) : "";
-	const tools = getCurrentTools(context.messages).map(toToolDeclaration);
+	const tools = getCurrentTools(all).map(toToolDeclaration);
 	const messages: TurnMessage[] = [];
 	const droppedCalls = new Set<string>();
-	for (const m of context.messages) {
+	for (const m of all) {
 		if (m === leading) continue;
 		if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
 			for (const c of m.content) if (c.type === "toolCall") droppedCalls.add(c.id);
