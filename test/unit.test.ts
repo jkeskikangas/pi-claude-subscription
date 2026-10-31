@@ -107,8 +107,25 @@ describe("synthesizeSession", () => {
 		const toolUse = lines[1].message.content.find((c: any) => c.type === "tool_use");
 		assert.equal(toolUse.name, "mcp__pi__read");
 		assert.equal(lines[2].message.content[0].tool_use_id, toolUse.id);
-		// Thinking from an earlier turn is not replayed (signature checks only apply to the current tool loop).
 		assert.ok(lines[1].message.content.some((c: any) => c.type === "thinking"), "thinking in the trailing tool loop is kept");
+	});
+
+	it("keeps thinking of earlier turns, so re-written transcripts stay identical", () => {
+		process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ccdir-"));
+		const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
+		const { sessionId } = synthesizeSession(cwd, "claude-sonnet-5-5", [
+			user("q1"),
+			assistant([
+				{ type: "thinking", thinking: "", thinkingSignature: "sig1" },
+				{ type: "text", text: "a1" },
+			]),
+			user("q2"),
+			assistant([{ type: "text", text: "a2" }]),
+		]);
+		const dir = readdirOne(join(process.env.CLAUDE_CONFIG_DIR, "projects"));
+		const lines = readFileSync(join(dir, `${sessionId}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		delete process.env.CLAUDE_CONFIG_DIR;
+		assert.deepEqual(lines[1].message.content.map((c: any) => c.type), ["thinking", "text"]);
 	});
 });
 

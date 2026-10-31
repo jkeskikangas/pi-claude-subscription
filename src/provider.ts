@@ -14,7 +14,7 @@ import type {
 import { calculateCost, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { forkSession as forkSdkSession } from "@anthropic-ai/claude-agent-sdk";
 import { AnchorRegistry } from "./anchors.ts";
-import { findMessageUuid, synthesizeSession } from "./cc-sessions.ts";
+import { appendToSession, findEndOfResults, findMessageUuid, findTurnStart, synthesizeSession, type WrittenEntry } from "./cc-sessions.ts";
 import { piToolName, readTranscript, type Transcript, type TurnMessage, userTurnBlocks, fingerprint } from "./convert.ts";
 import { thinkingOptions } from "./models.ts";
 import { type ClaudeSession, errorText, LiveSession, type SessionSpec } from "./session.ts";
@@ -142,6 +142,9 @@ export class ClaudeSdkProvider {
 			}
 			session.chain = t.chain[t.messages.length];
 			session.count = t.messages.length;
+			// A new user turn: remember where Claude Code recorded it, so a later edit that removes this
+			// turn's responses can still resume right after the user turn instead of rebuilding history.
+			const turnStart = t.messages[t.messages.length - 1].role === "user" ? session.chain : undefined;
 
 			const step = await this.readStep(session, model, options, stream, output, () => {
 				started = true;
@@ -159,6 +162,7 @@ export class ClaudeSdkProvider {
 			if (step.messageId && session.spec.tools.length > 0) {
 				const entryUuid = await session.entryUuid(step.messageId);
 				this.registry.put(session.chain, { sessionId: session.sessionId, messageId: step.messageId, cwd: session.spec.cwd, ...(entryUuid ? { entryUuid } : {}) });
+				if (turnStart && step.firstMessageId) this.registry.put(`u:${turnStart}`, { sessionId: session.sessionId, messageId: step.firstMessageId, cwd: session.spec.cwd });
 			}
 			session.awaiting = new Set(output.content.filter((c): c is ToolCall => c.type === "toolCall").map((c) => c.id));
 			if (output.stopReason !== "toolUse") session.awaiting.clear();
@@ -214,6 +218,14 @@ export class ClaudeSdkProvider {
 		let prefix = 0;
 		let route: Route = "fresh";
 		for (let k = n - 1; k >= 1 && spec.tools.length > 0; k--) {
+			if (t.messages[k - 1].role === "user") {
+				const r = await this.resumeAfterUserTurn(t, k, spec);
+				if (!r) continue;
+				resume = r.resume;
+				prefix = r.prefix;
+				route = "resume";
+				break;
+			}
 			if (t.messages[k - 1].role !== "assistant") continue;
 			const a = this.registry.get(t.chain[k]);
 			if (!a || a.cwd !== spec.cwd) continue;
@@ -228,14 +240,55 @@ export class ClaudeSdkProvider {
 			// transcript is forked: Claude Code may still be writing its final entries.
 			for (const s of this.sessions) if (s.sessionId === a.sessionId) this.drop(s);
 			await this.waitExited(a.sessionId);
+			// pi's history can continue differently from Claude Code's transcript after the anchor, for
+			// example when an extension edited or removed later messages. Claude Code only takes a user
+			// turn as input, so assistant messages after the anchor are written into the fork first.
+			let lastAssistant = -1;
+			for (let i = k; i < n; i++) if (t.messages[i].role === "assistant") lastAssistant = i;
+			// Tool results right after the anchor answer its calls. Resuming a transcript that ends in
+			// unanswered calls makes Claude Code insert "interrupted" results of its own, so the results
+			// go into the fork too: if Claude Code recorded exactly these, fork after its own entries
+			// (which keeps its cached bytes), otherwise write pi's. Something must remain to send.
+			let results = k;
+			while (results < n && t.messages[results].role === "toolResult") results++;
+			const endOfResults = results > k && results < n ? findEndOfResults(spec.cwd, a.sessionId, at, t.messages.slice(k, results) as ToolResultMessage[]) : undefined;
+			const forkAt = endOfResults ?? at;
+			const writeFrom = endOfResults ? results : k;
+			const writeTo = lastAssistant >= 0 ? lastAssistant + 1 : results < n ? results : writeFrom;
+			let forkedId: string | undefined;
 			resume = { sessionId: a.sessionId, at };
 			try {
-				const forked = await (this.opts.forkSession ?? forkPersistedSession)(a.sessionId, spec.cwd, at);
-				if (forked.sessionId && forked.sessionId !== a.sessionId) resume = { sessionId: forked.sessionId };
+				const forked = await (this.opts.forkSession ?? forkPersistedSession)(a.sessionId, spec.cwd, forkAt);
+				if (forked.sessionId && forked.sessionId !== a.sessionId) {
+					resume = { sessionId: forked.sessionId };
+					forkedId = forked.sessionId;
+				}
 			} catch (e) {
 				this.log(`fork anchor ${a.sessionId}/${a.messageId} failed (${errorText(e)}); resuming source session`);
 			}
-			prefix = k;
+			if (!forkedId) {
+				// Resuming the source session at the anchor, as before; never write into it, other
+				// branches resume from it.
+				prefix = k;
+				if (lastAssistant >= 0) {
+					this.log(`cannot write the diverged history without a fork of ${a.sessionId}; synthesizing`);
+					resume = undefined;
+					break;
+				}
+			} else if (writeTo > writeFrom) {
+				const written: WrittenEntry[] = [];
+				const appendedAt = appendToSession(spec.cwd, forkedId, spec.model, t.messages.slice(writeFrom, writeTo), written);
+				if (!appendedAt) {
+					this.log(`cannot write the diverged history into a fork of ${a.sessionId}; synthesizing`);
+					resume = undefined;
+					break;
+				}
+				this.rememberWritten(t, writeFrom, forkedId, spec, written);
+				resume = { sessionId: forkedId, at: appendedAt };
+				prefix = writeTo;
+			} else {
+				prefix = writeFrom;
+			}
 			route = "resume";
 			break;
 		}
@@ -245,7 +298,9 @@ export class ClaudeSdkProvider {
 				if (m.role === "assistant") last = i;
 			});
 			if (last >= 0) {
-				resume = synthesizeSession(spec.cwd, spec.model, t.messages.slice(0, last + 1));
+				const written: WrittenEntry[] = [];
+				resume = synthesizeSession(spec.cwd, spec.model, t.messages.slice(0, last + 1), written);
+				this.rememberWritten(t, 0, resume.sessionId, spec, written);
 				prefix = last + 1;
 				route = "synth";
 			}
@@ -261,6 +316,56 @@ export class ClaudeSdkProvider {
 	}
 
 	/**
+	 * Resume after the user turn that ends at `t.messages[k - 1]`, as Claude Code recorded it, when
+	 * pi's history after it was edited (for example a compaction removed the turn's work). The kept
+	 * assistant messages after it are written into a fork, so Claude Code reads its cached prefix
+	 * through the user turn. Returns undefined when that turn is unknown or the fork fails.
+	 */
+	private async resumeAfterUserTurn(t: Transcript, k: number, spec: SessionSpec): Promise<{ resume: { sessionId: string; at: string }; prefix: number } | undefined> {
+		let lastAssistant = -1;
+		for (let i = k; i < t.messages.length; i++) if (t.messages[i].role === "assistant") lastAssistant = i;
+		// Resuming a transcript that ends in a user turn makes Claude Code add a reply of its own.
+		if (lastAssistant < 0) return undefined;
+		const a = this.registry.get(`u:${t.chain[k]}`);
+		if (!a || a.cwd !== spec.cwd) return undefined;
+		if (this.sessions.some((s) => s.busy && s.sessionId === a.sessionId)) return undefined;
+		const at = findTurnStart(a.cwd, a.sessionId, a.messageId);
+		if (!at) {
+			this.log(`user turn before ${a.sessionId}/${a.messageId} not found on disk`);
+			return undefined;
+		}
+		for (const s of this.sessions) if (s.sessionId === a.sessionId) this.drop(s);
+		await this.waitExited(a.sessionId);
+		let forkedId: string | undefined;
+		try {
+			const forked = await (this.opts.forkSession ?? forkPersistedSession)(a.sessionId, spec.cwd, at);
+			if (forked.sessionId && forked.sessionId !== a.sessionId) forkedId = forked.sessionId;
+		} catch (e) {
+			this.log(`fork after the user turn of ${a.sessionId} failed (${errorText(e)})`);
+		}
+		if (!forkedId) return undefined;
+		const written: WrittenEntry[] = [];
+		const appendedAt = appendToSession(spec.cwd, forkedId, spec.model, t.messages.slice(k, lastAssistant + 1), written);
+		if (!appendedAt) return undefined;
+		this.rememberWritten(t, k, forkedId, spec, written);
+		return { resume: { sessionId: forkedId, at: appendedAt }, prefix: lastAssistant + 1 };
+	}
+
+	/**
+	 * Anchors for assistant messages the provider wrote into a transcript (`offset` is where the written
+	 * messages start in `t`). Claude Code sends those entries as written, so a later edit inside that
+	 * history can resume there and keep the cached prefix instead of synthesizing it again.
+	 */
+	private rememberWritten(t: Transcript, offset: number, sessionId: string, spec: SessionSpec, written: WrittenEntry[]): void {
+		if (spec.tools.length === 0) return;
+		for (const w of written) {
+			const i = offset + w.index;
+			this.registry.put(t.chain[i + 1], { sessionId, messageId: w.messageId, cwd: spec.cwd, entryUuid: w.uuid });
+			if (i > 0 && t.messages[i - 1].role === "user") this.registry.put(`u:${t.chain[i]}`, { sessionId, messageId: w.messageId, cwd: spec.cwd });
+		}
+	}
+
+	/**
 	 * Consume Claude Code events until the current API response ends, emitting pi events.
 	 * Returns the API message id, "aborted", or an error.
 	 */
@@ -271,12 +376,14 @@ export class ClaudeSdkProvider {
 		stream: AssistantMessageEventStream,
 		output: AssistantMessage,
 		onStart: () => void,
-	): Promise<{ ok: true; messageId?: string } | "aborted" | { ok: false; error: string }> {
+	): Promise<{ ok: true; messageId?: string; firstMessageId?: string } | "aborted" | { ok: false; error: string }> {
 		const signal = options?.signal;
 		type Block = (TextContent | ThinkingContent | (ToolCall & { partialJson?: string })) & { index?: number };
 		const blocks = output.content as Block[];
 		let started = false;
 		let messageId: string | undefined;
+		// The first response of the turn that Claude Code completed (a retried one is not recorded).
+		let firstMessageId: string | undefined;
 		let stopReason: string | undefined;
 		// A turn can span several API responses: Claude Code continues on its own after an output
 		// limit, an empty response or a cut-off stream. They fold into one pi message.
@@ -402,6 +509,7 @@ export class ClaudeSdkProvider {
 						case "message_stop":
 							for (const b of blocks) delete b.index;
 							inResponse = false;
+							firstMessageId ??= messageId;
 							Object.assign(finished, {
 								input: finished.input + current.input,
 								output: finished.output + current.output,
@@ -414,7 +522,7 @@ export class ClaudeSdkProvider {
 							output.stopReason = turnStop;
 							// A tool call hands control to pi. Any other stop may still be followed by Claude
 							// Code's own continuation, so the turn ends only at its result.
-							if (turnStop === "toolUse") return { ok: true, messageId };
+							if (turnStop === "toolUse") return { ok: true, messageId, firstMessageId };
 							break;
 					}
 				} else if (m.type === "assistant" && m.error && !started) {
@@ -424,7 +532,7 @@ export class ClaudeSdkProvider {
 					if (m.is_error || m.subtype !== "success") return { ok: false, error: (m.errors ?? []).join("\n") || m.result || `Claude Code ${m.subtype}` };
 					output.stopReason = turnStop ?? "stop";
 					start();
-					return { ok: true, messageId };
+					return { ok: true, messageId, firstMessageId };
 				}
 			}
 		} finally {

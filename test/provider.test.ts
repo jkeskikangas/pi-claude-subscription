@@ -1,7 +1,7 @@
 // Offline tests for the provider's event translation and routing, driven by a fake Claude Code session
 // that replays scripted SDK events.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -296,6 +296,249 @@ describe("routing", () => {
 		assert.equal(text(a2.msg), "second");
 	});
 
+	it("appends an edited tail to the fork instead of dropping its assistant messages", async () => {
+		const streamed = (id: string, uuid: string) => ({ type: "assistant", uuid, parent_tool_use_id: null, message: { id } });
+		const h = harness([
+			[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use"), streamed("msg_A", "uuid-A")],
+			[...apiMessage("msg_B", [{ tool: "read", id: "toolu_2", args: { path: "b".repeat(50) } }], "tool_use"), streamed("msg_B", "uuid-B")],
+			[...apiMessage("msg_C", [{ text: "done" }], "end_turn"), result],
+		]);
+		const forkFile = (sid: string) => join(projectDir(h.cwd), `fork-${sid}.jsonl`);
+		(h.provider as any).opts.forkSession = async (sessionId: string, cwd: string, at: string) => {
+			h.forkCalls.push({ sessionId, cwd, at });
+			mkdirSync(projectDir(h.cwd), { recursive: true });
+			writeFileSync(forkFile(sessionId), `${JSON.stringify({ type: "assistant", uuid: "fork-uuid-A", isSidechain: false, message: { id: "msg_A" } })}\n${JSON.stringify({ type: "custom-title", title: "pi" })}\n`);
+			return { sessionId: `fork-${sessionId}` };
+		};
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		hist.push(a1.msg, toolResult("toolu_1", "A"));
+		const a2 = await h.call(hist);
+		assert.equal(a2.route, "live");
+		// pi shrinks the second call before it is ever sent back.
+		const shrunk = { ...a2.msg, content: [{ type: "toolCall", id: "toolu_2", name: "read", arguments: { path: "b…" } }] } as AssistantMessage;
+		hist.push(shrunk, toolResult("toolu_2", "B"));
+		const a3 = await h.call(hist);
+		assert.equal(a3.route, "resume");
+		const sid = h.created[0].sessionId;
+		assert.deepEqual(h.forkCalls, [{ sessionId: sid, cwd: h.cwd, at: "uuid-A" }], "forked at the last unedited assistant message");
+		const entries = readFileSync(forkFile(sid), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		const [user1, asst2] = entries.slice(2);
+		assert.equal(user1.parentUuid, "fork-uuid-A");
+		assert.equal(user1.message.content[0].tool_use_id, "toolu_1");
+		assert.equal(asst2.parentUuid, user1.uuid);
+		assert.deepEqual(asst2.message.content, [{ type: "tool_use", id: "toolu_2", name: "mcp__pi__read", input: { path: "b…" } }]);
+		assert.deepEqual(h.created[1].spec.resume, { sessionId: `fork-${sid}`, at: asst2.uuid });
+		assert.equal(h.created[1].sent.length, 1);
+		assert.deepEqual(h.created[1].sent[0].map((b: any) => b.tool_use_id), ["toolu_2"], "only the results after the edited message are sent");
+		assert.equal(text(a3.msg), "done");
+	});
+
+	it("forks after the tool results and attachments Claude Code recorded, appending only the edited message", async () => {
+		const streamed = (id: string, uuid: string) => ({ type: "assistant", uuid, parent_tool_use_id: null, message: { id } });
+		const h = harness([
+			[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use"), streamed("msg_A", "uuid-A")],
+			[...apiMessage("msg_B", [{ tool: "read", id: "toolu_2", args: { path: "b" } }], "tool_use"), streamed("msg_B", "uuid-B")],
+			[...apiMessage("msg_C", [{ text: "done" }], "end_turn"), result],
+		]);
+		const forks: string[] = [];
+		(h.provider as any).opts.forkSession = async (sessionId: string, _cwd: string, at: string) => {
+			forks.push(at);
+			writeFileSync(join(projectDir(h.cwd), `fork-${sessionId}.jsonl`), `${JSON.stringify({ type: "attachment", uuid: "fork-att", parentUuid: "x", isSidechain: false })}\n${JSON.stringify({ type: "user", uuid: "fork-last", parentUuid: "fork-att", isSidechain: false, message: { content: [] } })}\n`);
+			return { sessionId: `fork-${sessionId}` };
+		};
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		hist.push(a1.msg, toolResult("toolu_1", "A"));
+		const a2 = await h.call(hist);
+		// What Claude Code recorded: the result it was given, then context it attached.
+		const sid = h.created[0].sessionId;
+		const entry = (o: object) => JSON.stringify({ isSidechain: false, ...o });
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(
+			join(projectDir(h.cwd), `${sid}.jsonl`),
+			[
+				entry({ type: "assistant", uuid: "uuid-A", parentUuid: "u0", message: { id: "msg_A" } }),
+				entry({ type: "user", uuid: "res-1", parentUuid: "uuid-A", message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text", text: "A" }] }] } }),
+				entry({ type: "attachment", uuid: "att-1", parentUuid: "res-1" }),
+				entry({ type: "assistant", uuid: "uuid-B", parentUuid: "att-1", message: { id: "msg_B" } }),
+			].join("\n"),
+		);
+		const shrunk = { ...a2.msg, content: [{ type: "toolCall", id: "toolu_2", name: "read", arguments: { path: "short" } }] } as AssistantMessage;
+		hist.push(shrunk, toolResult("toolu_2", "B"));
+		const a3 = await h.call(hist);
+		assert.equal(a3.route, "resume");
+		assert.deepEqual(forks, ["att-1"], "forked after the recorded result and its attachment");
+		const appended = readFileSync(join(projectDir(h.cwd), `fork-${sid}.jsonl`), "utf8").trim().split("\n").slice(2).map((l) => JSON.parse(l));
+		assert.equal(appended.length, 1, "only the edited assistant message is appended");
+		assert.equal(appended[0].type, "assistant");
+		assert.equal(appended[0].parentUuid, "fork-last");
+		assert.deepEqual(h.created[1].sent[0].map((b: any) => b.tool_use_id), ["toolu_2"]);
+		assert.equal(text(a3.msg), "done");
+	});
+
+	it("resumes right after Claude Code's recorded user turn when every response after it was edited", async () => {
+		const h = harness([
+			[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use")],
+			[...apiMessage("msg_B", [{ tool: "read", id: "toolu_2", args: { path: "b" } }], "tool_use")],
+			[...apiMessage("msg_C", [{ text: "done" }], "end_turn"), result],
+		]);
+		const forks: string[] = [];
+		(h.provider as any).opts.forkSession = async (sessionId: string, _cwd: string, at: string) => {
+			forks.push(at);
+			writeFileSync(
+				join(projectDir(h.cwd), `fork-${sessionId}.jsonl`),
+				`${JSON.stringify({ type: "user", uuid: "fork-user", parentUuid: null, isSidechain: false, message: { content: [] } })}\n${JSON.stringify({ type: "attachment", uuid: "fork-att", parentUuid: "fork-user", isSidechain: false })}\n`,
+			);
+			return { sessionId: `fork-${sessionId}` };
+		};
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		hist.push(a1.msg, toolResult("toolu_1", "A"));
+		const a2 = await h.call(hist);
+		// What Claude Code recorded: the user turn, context it attached, then its responses.
+		const sid = h.created[0].sessionId;
+		const entry = (o: object) => JSON.stringify({ isSidechain: false, ...o });
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(
+			join(projectDir(h.cwd), `${sid}.jsonl`),
+			[
+				entry({ type: "user", uuid: "u0", parentUuid: null, message: { content: [{ type: "text", text: "go" }] } }),
+				entry({ type: "attachment", uuid: "att-0", parentUuid: "u0" }),
+				entry({ type: "assistant", uuid: "uuid-A", parentUuid: "att-0", message: { id: "msg_A" } }),
+			].join("\n"),
+		);
+		// A compaction removed the first response and its result; only the second call is kept.
+		const kept = { ...a2.msg, content: [{ type: "toolCall", id: "toolu_2", name: "read", arguments: { path: "b" } }] } as AssistantMessage;
+		const a3 = await h.call([user("go"), kept, toolResult("toolu_2", "B")]);
+		assert.equal(a3.route, "resume");
+		assert.deepEqual(forks, ["att-0"], "forked after the user turn and its attachment");
+		const appended = readFileSync(join(projectDir(h.cwd), `fork-${sid}.jsonl`), "utf8").trim().split("\n").slice(2).map((l) => JSON.parse(l));
+		assert.deepEqual(appended.map((e) => e.type), ["assistant"], "only the kept assistant message is written");
+		assert.equal(appended[0].parentUuid, "fork-att", "after the context Claude Code attached to the user turn");
+		assert.deepEqual(h.created[1].sent[0].map((b: any) => b.tool_use_id), ["toolu_2"]);
+		assert.equal(text(a3.msg), "done");
+	});
+
+	it("never resumes at unanswered tool calls: forks after Claude Code's recorded parallel results", async () => {
+		const streamed = { type: "assistant", uuid: "uuid-A2", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness([
+			[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }, { tool: "read", id: "toolu_2", args: { path: "b" } }], "tool_use"), streamed],
+			[...apiMessage("msg_B", [{ text: "unused" }], "end_turn"), result],
+			[...apiMessage("msg_C", [{ text: "continued" }], "end_turn"), result],
+		]);
+		const forks: string[] = [];
+		(h.provider as any).opts.forkSession = async (sessionId: string, _cwd: string, at: string) => {
+			forks.push(at);
+			return { sessionId: `fork-${sessionId}` };
+		};
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		const sid = h.created[0].sessionId;
+		const entry = (o: object) => JSON.stringify({ isSidechain: false, ...o });
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(
+			join(projectDir(h.cwd), `${sid}.jsonl`),
+			[
+				entry({ type: "assistant", uuid: "uuid-A1", parentUuid: "u0", message: { id: "msg_A" } }),
+				entry({ type: "assistant", uuid: "uuid-A2", parentUuid: "uuid-A1", message: { id: "msg_A" } }),
+				entry({ type: "user", uuid: "res-1", parentUuid: "uuid-A1", message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text", text: "A" }] }] } }),
+				entry({ type: "user", uuid: "res-2", parentUuid: "uuid-A2", message: { content: [{ type: "tool_result", tool_use_id: "toolu_2", content: "B" }] } }),
+				entry({ type: "attachment", uuid: "att-1", parentUuid: "res-2" }),
+				entry({ type: "assistant", uuid: "uuid-B", parentUuid: "att-1", message: { id: "msg_B" } }),
+			].join("\n"),
+		);
+		// pi drops what followed the results (a rewind) and adds a message after them.
+		hist.push(a1.msg, toolResult("toolu_1", "A"), toolResult("toolu_2", "B"), user("handoff"));
+		const a2 = await h.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(forks, ["att-1"]);
+		assert.deepEqual(h.created[1].spec.resume, { sessionId: `fork-${sid}` });
+		assert.deepEqual(h.created[1].sent[0], [{ type: "text", text: "handoff" }], "only the new message is sent");
+	});
+
+	it("writes pi's results into the fork when they differ from what Claude Code recorded", async () => {
+		const streamed = { type: "assistant", uuid: "uuid-A", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness([
+			[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use"), streamed],
+			[...apiMessage("msg_C", [{ text: "continued" }], "end_turn"), result],
+		]);
+		const forkFile = (sid: string) => join(projectDir(h.cwd), `fork-${sid}.jsonl`);
+		(h.provider as any).opts.forkSession = async (sessionId: string) => {
+			mkdirSync(projectDir(h.cwd), { recursive: true });
+			writeFileSync(forkFile(sessionId), `${JSON.stringify({ type: "assistant", uuid: "fork-A", isSidechain: false, message: { id: "msg_A" } })}\n`);
+			return { sessionId: `fork-${sessionId}` };
+		};
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		hist.push(a1.msg, toolResult("toolu_1", "edited A"), user("handoff"));
+		const a2 = await h.call(hist);
+		assert.equal(a2.route, "resume");
+		const sid = h.created[0].sessionId;
+		const appended = readFileSync(forkFile(sid), "utf8").trim().split("\n").slice(1).map((l) => JSON.parse(l));
+		assert.equal(appended.length, 1);
+		assert.equal(appended[0].parentUuid, "fork-A");
+		assert.equal(appended[0].message.content[0].content[0].text, "edited A");
+		assert.deepEqual(h.created[1].spec.resume, { sessionId: `fork-${sid}`, at: appended[0].uuid });
+		assert.deepEqual(h.created[1].sent[0], [{ type: "text", text: "handoff" }]);
+	});
+
+	it("keeps sending results that are the whole tail, since nothing would be left to answer", async () => {
+		const streamed = { type: "assistant", uuid: "uuid-A", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness([
+			[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use"), streamed],
+			[...apiMessage("msg_C", [{ text: "continued" }], "end_turn"), result],
+		]);
+		const forks: string[] = [];
+		(h.provider as any).opts.forkSession = async (sessionId: string, _cwd: string, at: string) => {
+			forks.push(at);
+			return { sessionId: `fork-${sessionId}` };
+		};
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		h.provider.shutdown();
+		const sid = h.created[0].sessionId;
+		mkdirSync(projectDir(h.cwd), { recursive: true });
+		writeFileSync(
+			join(projectDir(h.cwd), `${sid}.jsonl`),
+			[
+				JSON.stringify({ type: "assistant", uuid: "uuid-A", parentUuid: "u0", isSidechain: false, message: { id: "msg_A" } }),
+				JSON.stringify({ type: "user", uuid: "res-1", parentUuid: "uuid-A", isSidechain: false, message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "A" }] } }),
+			].join("\n"),
+		);
+		hist.push(a1.msg, toolResult("toolu_1", "A"));
+		const a2 = await h.call(hist);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(forks, ["uuid-A"]);
+		assert.deepEqual(h.created[1].sent[0].map((b: any) => b.tool_use_id), ["toolu_1"]);
+	});
+
+	it("synthesizes instead of resuming the source session when an edited tail cannot be appended", async () => {
+		const streamed = { type: "assistant", uuid: "uuid-A", parent_tool_use_id: null, message: { id: "msg_A" } };
+		const h = harness(
+			[
+				[...apiMessage("msg_A", [{ tool: "read", id: "toolu_1", args: { path: "a" } }], "tool_use"), streamed],
+				[...apiMessage("msg_B", [{ tool: "read", id: "toolu_2", args: { path: "b" } }], "tool_use")],
+				[...apiMessage("msg_C", [{ text: "done" }], "end_turn"), result],
+			],
+			undefined,
+			{ forkSession: async () => { throw new Error("fork unavailable"); } },
+		);
+		const hist: Message[] = [user("go")];
+		const a1 = await h.call(hist);
+		hist.push(a1.msg, toolResult("toolu_1", "A"));
+		const a2 = await h.call(hist);
+		const shrunk = { ...a2.msg, content: [{ type: "toolCall", id: "toolu_2", name: "read", arguments: { path: "short" } }] } as AssistantMessage;
+		hist.push(shrunk, toolResult("toolu_2", "B"));
+		const a3 = await h.call(hist);
+		assert.equal(a3.route, "synth");
+		assert.notEqual(h.created[1].spec.resume?.sessionId, h.created[0].sessionId, "the source session is left untouched");
+		assert.deepEqual(h.created[1].sent[0].map((b: any) => b.tool_use_id), ["toolu_2"]);
+		assert.equal(text(a3.msg), "done");
+	});
+
 	it("synthesizes a session for history from another provider", async () => {
 		const h = harness([[...apiMessage("m", [{ text: "ok" }], "end_turn"), result]]);
 		const foreign = { role: "assistant", content: [{ type: "text", text: "hi from gpt" }], api: "openai-responses", provider: "openai", model: "gpt", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 1 } as AssistantMessage;
@@ -303,6 +546,20 @@ describe("routing", () => {
 		assert.equal(a.route, "synth");
 		assert.ok(h.created[0].spec.resume?.at);
 		assert.deepEqual(h.created[0].sent[0], [{ type: "text", text: "continue" }]);
+	});
+
+	it("resumes inside synthesized history after a later edit instead of synthesizing it again", async () => {
+		const h = harness([[...apiMessage("m", [{ text: "ok" }], "end_turn"), result], [...apiMessage("m2", [{ text: "ok2" }], "end_turn"), result]]);
+		const foreign = { role: "assistant", content: [{ type: "text", text: "hi from gpt" }], api: "openai-responses", provider: "openai", model: "gpt", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 1 } as AssistantMessage;
+		const a1 = await h.call([user("hello"), foreign, user("continue")]);
+		assert.equal(a1.route, "synth");
+		const synthId = h.created[0].sessionId;
+		const entry = h.created[0].spec.resume!.at;
+		// An edit removes the last turn and its answer: the written entry for `foreign` is still the resume point.
+		const a2 = await h.call([user("hello"), foreign, user("something else")]);
+		assert.equal(a2.route, "resume");
+		assert.deepEqual(h.forkCalls, [{ sessionId: synthId, cwd: h.cwd, at: entry }]);
+		assert.equal(text(a2.msg), "ok2");
 	});
 
 	it("never attaches a second concurrent request to a busy session (F4)", async () => {

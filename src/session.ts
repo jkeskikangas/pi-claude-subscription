@@ -282,10 +282,15 @@ export class LiveSession implements ClaudeSession {
 	close(): void {
 		if (this.dead) return;
 		this.dead = true;
-		this.input.close();
-		try {
-			this.q.close();
-		} catch {}
+		// Stop the turn first. Closing alone ends Claude Code's input, and it can take seconds to exit:
+		// meanwhile the parked tool calls fail and Claude Code sends one more request with their errors.
+		const stop = () => {
+			this.input.close();
+			try {
+				this.q.close();
+			} catch {}
+		};
+		Promise.race([this.q.interrupt(), new Promise((r) => setTimeout(r, 2000).unref())]).then(stop, stop);
 	}
 
 	get stderr(): string {
