@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **New:** `ProviderOptions.configDir` runs a provider on its own Claude Code config dir: the child gets it as `CLAUDE_CONFIG_DIR` (and an Anthropic profile dir inside it, so a machine-wide `~/.config/anthropic` profile cannot sign it in with API billing), synthesized and anchored transcripts are read and written there, and forks go through an Agent SDK session store over that dir instead of the process environment. One process can now host several Claude logins. `ProviderOptions.onRateLimit` receives every `rate_limit_event` (plan windows, utilization, overage) Claude Code reports.
+- **Fix:** the package version is imported instead of read from `package.json` at load, so a bundled build (`bun build --compile`) starts.
+
 ## 0.2.4 — 2026-10-16
 
 - **Change:** divergence now uses the Agent SDK's native session operations. Claude Code sessions record the transcript-entry uuid streamed with each assistant message, anchors persist that uuid, and a diverged or restarted conversation is copied with `forkSession` up to the anchored entry before the fork is resumed — instead of resuming the source session at a uuid found by scanning Claude Code's transcript files. Anchors persisted by older versions still resolve through that scan, and if forking fails the provider falls back to resuming the source session at the anchor.

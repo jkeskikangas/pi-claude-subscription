@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type Query, query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool, ToolResultMessage } from "@earendil-works/pi-ai";
 import { MCP_PREFIX, MCP_SERVER, toolUseId } from "./convert.ts";
 import { AsyncQueue } from "./util.ts";
+import pkg from "../package.json" with { type: "json" };
 
 export interface SessionSpec {
 	cwd: string;
@@ -22,10 +23,13 @@ export interface SessionSpec {
 	/** Resume this Claude Code session, cut after `at` when given. Omit for a fresh session. */
 	resume?: { sessionId: string; at?: string };
 	pathToClaudeCodeExecutable?: string;
+	/** Claude Code config dir (login, transcripts) for the child; omitted, the inherited one. */
+	configDir?: string;
 	debug?: (msg: string) => void;
 }
 
-const CLIENT_APP = `pi-claude-subscription/${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version}`;
+// Imported, not read from disk: a bundled build (bun build --compile) has no package.json next to it.
+const CLIENT_APP = `pi-claude-subscription/${pkg.version}`;
 
 type CallToolResult = { content: any[]; isError?: boolean };
 
@@ -77,6 +81,8 @@ export function childEnv(base: Record<string, string | undefined>, spec: Session
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 		CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
 		CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
+		// Own config dir, own login: a machine-wide Anthropic profile (~/.config/anthropic) would sign the child in with API billing.
+		...(spec.configDir ? { CLAUDE_CONFIG_DIR: spec.configDir, ANTHROPIC_CONFIG_DIR: join(spec.configDir, "anthropic") } : {}),
 		...(spec.noCache ? { DISABLE_PROMPT_CACHING: "1" } : {}),
 		...(spec.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxOutputTokens) } : {}),
 	};

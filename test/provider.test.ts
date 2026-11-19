@@ -1,16 +1,16 @@
 // Offline tests for the provider's event translation and routing, driven by a fake Claude Code session
 // that replays scripted SDK events.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { normalizeContext, Type, type AssistantMessage, type Message, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { AnchorRegistry } from "../src/anchors.ts";
-import { projectDir } from "../src/cc-sessions.ts";
+import { projectDir, synthesizeSession } from "../src/cc-sessions.ts";
 import { resolveConfig } from "../src/config.ts";
 import { anthropicChatModels, claudeModels } from "../src/models.ts";
-import { API, ClaudeSdkProvider } from "../src/provider.ts";
+import { API, ClaudeSdkProvider, forkPersistedSession } from "../src/provider.ts";
 import type { ClaudeSession, SessionSpec } from "../src/session.ts";
 import { childEnv } from "../src/session.ts";
 import { AsyncQueue } from "../src/util.ts";
@@ -483,5 +483,45 @@ describe("model refresh (F7)", () => {
 			{ ...base, id: "gpt-x", name: "G", provider: "openai" },
 		] as any);
 		assert.deepEqual(picked.map((m) => m.id), ["claude-new-6", "claude-new-6"]);
+	});
+});
+
+describe("provider config dir and rate limits", () => {
+	const foreign = { role: "assistant", content: [{ type: "text", text: "hi from gpt" }], api: "openai-responses", provider: "openai", model: "gpt", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 1 } as AssistantMessage;
+
+	it("keeps the child's CLAUDE_CONFIG_DIR and its transcripts in the provider's config dir", async () => {
+		const configDir = mkdtempSync(join(tmpdir(), "own-cc-"));
+		const h = harness([[...apiMessage("m", [{ text: "ok" }], "end_turn"), result]], undefined, { configDir });
+		const a = await h.call([user("hello"), foreign, user("continue")]);
+		assert.equal(a.route, "synth");
+		const spec = h.created[0].spec;
+		const env = childEnv({ CLAUDE_CONFIG_DIR: "/elsewhere", ANTHROPIC_CONFIG_DIR: "/machine-profile" }, spec);
+		assert.equal(env.CLAUDE_CONFIG_DIR, configDir);
+		assert.equal(env.ANTHROPIC_CONFIG_DIR, join(configDir, "anthropic"));
+		assert.ok(existsSync(join(projectDir(h.cwd, configDir), `${spec.resume!.sessionId}.jsonl`)));
+		assert.ok(!existsSync(join(projectDir(h.cwd), `${spec.resume!.sessionId}.jsonl`)), "nothing lands in the process-wide config dir");
+	});
+
+	it("forks a persisted session inside the provider's config dir with the Agent SDK", async () => {
+		const configDir = mkdtempSync(join(tmpdir(), "own-cc-"));
+		const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
+		const assistant = { ...foreign, api: API, provider: "claude-sdk", model: "claude-sonnet-5-5", content: [{ type: "text", text: "first" }] } as AssistantMessage;
+		const src = synthesizeSession(cwd, "claude-sonnet-5-5", [user("one"), assistant, user("two"), { ...assistant, content: [{ type: "text", text: "second" }] }], configDir);
+		const firstAnswer = JSON.parse(readFileSync(join(projectDir(cwd, configDir), `${src.sessionId}.jsonl`), "utf8").split("\n")[1]).uuid;
+		const forked = await forkPersistedSession(src.sessionId, cwd, firstAnswer, configDir);
+		assert.notEqual(forked.sessionId, src.sessionId);
+		const lines = readFileSync(join(projectDir(cwd, configDir), `${forked.sessionId}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		assert.deepEqual(lines.filter((l) => l.type === "user" || l.type === "assistant").map((l) => l.message.content[0].text), ["one", "first"]);
+		assert.ok(!existsSync(projectDir(cwd)) || readdirSync(projectDir(cwd)).length === 0, "nothing lands in the process-wide config dir");
+	});
+
+	it("reports every rate_limit_event to onRateLimit", async () => {
+		const seen: object[] = [];
+		const info = { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.81, resetsAt: 1_800_000_000, isUsingOverage: false };
+		const event = { type: "rate_limit_event", rate_limit_info: info, uuid: "u", session_id: "s" };
+		const h = harness([[event, ...apiMessage("m", [{ text: "ok" }], "end_turn"), event, result]], undefined, { onRateLimit: (i: object) => seen.push(i) });
+		const a = await h.call([user("hello")]);
+		assert.equal(text(a.msg), "ok");
+		assert.deepEqual(seen, [info, info]);
 	});
 });

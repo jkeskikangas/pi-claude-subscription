@@ -12,9 +12,9 @@ import type {
 	TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { calculateCost, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { forkSession as forkSdkSession } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession as forkSdkSession, type SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
 import { AnchorRegistry } from "./anchors.ts";
-import { findMessageUuid, synthesizeSession } from "./cc-sessions.ts";
+import { configDirStore, findMessageUuid, synthesizeSession } from "./cc-sessions.ts";
 import { piToolName, readTranscript, type Transcript, type TurnMessage, userTurnBlocks, fingerprint } from "./convert.ts";
 import { thinkingOptions } from "./models.ts";
 import { type ClaudeSession, errorText, LiveSession, type SessionSpec } from "./session.ts";
@@ -24,6 +24,10 @@ export const API = "claude-agent-sdk";
 
 export interface ProviderOptions {
 	pathToClaudeCodeExecutable?: string;
+	/** Claude Code config dir (login, transcripts) this provider runs with; omitted, the process-wide one. */
+	configDir?: string;
+	/** Called with every plan-limit update Claude Code reports for the logged-in account. */
+	onRateLimit?: (info: SDKRateLimitInfo) => void;
 	/** Live Claude Code processes kept for reuse (one per concurrent conversation). */
 	maxSessions?: number;
 	/** Close a process idle this long; the conversation resumes from disk on its next turn. */
@@ -47,7 +51,7 @@ export class ClaudeSdkProvider {
 	/** Sessions a provider call is reading right now (not the `busy` flag, which a failed attach could leave set). */
 	private readonly active = new Set<ClaudeSession>();
 	private readonly registry: AnchorRegistry;
-	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "debug" | "createSession" | "forkSession">> & ProviderOptions;
+	private readonly opts: Required<Omit<ProviderOptions, "registry" | "pathToClaudeCodeExecutable" | "configDir" | "onRateLimit" | "debug" | "createSession" | "forkSession">> & ProviderOptions;
 	private timer?: NodeJS.Timeout;
 	lastRoute?: Route;
 
@@ -116,6 +120,7 @@ export class ClaudeSdkProvider {
 				...thinking,
 				maxOutputTokens: options?.maxTokens ?? model.maxTokens,
 				pathToClaudeCodeExecutable: this.opts.pathToClaudeCodeExecutable,
+				configDir: this.opts.configDir,
 				debug: this.opts.debug,
 			} satisfies SessionSpec;
 
@@ -219,7 +224,7 @@ export class ClaudeSdkProvider {
 			if (!a || a.cwd !== spec.cwd) continue;
 			// Another call is mid-response on that session; resuming would end it.
 			if (this.sessions.some((s) => s.busy && s.sessionId === a.sessionId)) continue;
-			const at = a.entryUuid ?? findMessageUuid(a.cwd, a.sessionId, a.messageId);
+			const at = a.entryUuid ?? findMessageUuid(a.cwd, a.sessionId, a.messageId, this.opts.configDir);
 			if (!at) {
 				this.log(`anchor ${a.sessionId}/${a.messageId} not found on disk`);
 				continue;
@@ -230,7 +235,8 @@ export class ClaudeSdkProvider {
 			await this.waitExited(a.sessionId);
 			resume = { sessionId: a.sessionId, at };
 			try {
-				const forked = await (this.opts.forkSession ?? forkPersistedSession)(a.sessionId, spec.cwd, at);
+				const fork = this.opts.forkSession ?? ((id: string, cwd: string, upTo: string) => forkPersistedSession(id, cwd, upTo, this.opts.configDir));
+				const forked = await fork(a.sessionId, spec.cwd, at);
 				if (forked.sessionId && forked.sessionId !== a.sessionId) resume = { sessionId: forked.sessionId };
 			} catch (e) {
 				this.log(`fork anchor ${a.sessionId}/${a.messageId} failed (${errorText(e)}); resuming source session`);
@@ -245,7 +251,7 @@ export class ClaudeSdkProvider {
 				if (m.role === "assistant") last = i;
 			});
 			if (last >= 0) {
-				resume = synthesizeSession(spec.cwd, spec.model, t.messages.slice(0, last + 1));
+				resume = synthesizeSession(spec.cwd, spec.model, t.messages.slice(0, last + 1), this.opts.configDir);
 				prefix = last + 1;
 				route = "synth";
 			}
@@ -323,6 +329,10 @@ export class ClaudeSdkProvider {
 				}
 				if (m === undefined) return { ok: false, error: errorText(new Error("Claude Code exited unexpectedly"), session.stderr) };
 				if (m.type === "pi_error") return { ok: false, error: m.error };
+				if (m.type === "rate_limit_event") {
+					this.opts.onRateLimit?.(m.rate_limit_info);
+					continue;
+				}
 				if (m.type === "stream_event" && !m.parent_tool_use_id) {
 					const ev = m.event;
 					await options?.onProviderStreamEvent?.(ev, model);
@@ -494,8 +504,8 @@ export class ClaudeSdkProvider {
 	}
 }
 
-async function forkPersistedSession(sessionId: string, cwd: string, at: string): Promise<{ sessionId: string }> {
-	return forkSdkSession(sessionId, { dir: cwd, upToMessageId: at, title: "pi" });
+export async function forkPersistedSession(sessionId: string, cwd: string, at: string, configDir?: string): Promise<{ sessionId: string }> {
+	return forkSdkSession(sessionId, { dir: cwd, upToMessageId: at, title: "pi", ...(configDir ? { sessionStore: configDirStore(cwd, configDir) } : {}) });
 }
 
 function mapStop(reason: string | undefined): StopReason {

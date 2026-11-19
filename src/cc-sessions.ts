@@ -1,31 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { SessionKey, SessionStore, SessionStoreEntry } from "@anthropic-ai/claude-agent-sdk";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { assistantBlocks, type TurnMessage, userTurnBlocks } from "./convert.ts";
 
-function projectsRoot(): string {
-	return join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects");
+/** `configDir` is the Claude Code config dir a provider runs with; omitted, the process-wide one. */
+function projectsRoot(configDir?: string): string {
+	return join(configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects");
 }
 
 /** Claude Code's per-project session directory: the working directory's realpath, sanitized. */
-export function projectDir(cwd: string): string {
+export function projectDir(cwd: string, configDir?: string): string {
 	let real = cwd;
 	try {
 		real = realpathSync(cwd);
 	} catch {}
-	return join(projectsRoot(), real.replace(/[^a-zA-Z0-9]/g, "-"));
+	return join(projectsRoot(configDir), real.replace(/[^a-zA-Z0-9]/g, "-"));
 }
 
 /** Path of a session's transcript, wherever Claude Code filed it. */
-export function sessionFile(cwd: string, sessionId: string): string | undefined {
+export function sessionFile(cwd: string, sessionId: string, configDir?: string): string | undefined {
 	const name = `${sessionId}.jsonl`;
-	const direct = join(projectDir(cwd), name);
+	const direct = join(projectDir(cwd, configDir), name);
 	if (existsSync(direct)) return direct;
 	try {
-		for (const dir of readdirSync(projectsRoot())) {
-			const f = join(projectsRoot(), dir, name);
+		for (const dir of readdirSync(projectsRoot(configDir))) {
+			const f = join(projectsRoot(configDir), dir, name);
 			if (existsSync(f)) return f;
 		}
 	} catch {}
@@ -37,8 +39,8 @@ export function sessionFile(cwd: string, sessionId: string): string | undefined 
  * message `messageId` (it stores one entry per content block). New anchors capture this uuid
  * from the SDK stream instead; this scan serves anchors persisted before that was possible.
  */
-export function findMessageUuid(cwd: string, sessionId: string, messageId: string): string | undefined {
-	const file = sessionFile(cwd, sessionId);
+export function findMessageUuid(cwd: string, sessionId: string, messageId: string, configDir?: string): string | undefined {
+	const file = sessionFile(cwd, sessionId, configDir);
 	if (!file) return undefined;
 	let uuid: string | undefined;
 	for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -56,7 +58,7 @@ export function findMessageUuid(cwd: string, sessionId: string, messageId: strin
  * provider's turns, a compacted session, a session from before this extension). Returns the
  * session id and the uuid to resume at. `messages` must end with an assistant message.
  */
-export function synthesizeSession(cwd: string, model: string, messages: TurnMessage[]): { sessionId: string; at: string } {
+export function synthesizeSession(cwd: string, model: string, messages: TurnMessage[], configDir?: string): { sessionId: string; at: string } {
 	const sessionId = randomUUID();
 	const lines: string[] = [];
 	let parent: string | null = null;
@@ -115,7 +117,34 @@ export function synthesizeSession(cwd: string, model: string, messages: TurnMess
 		}
 		parent = uuid;
 	}
-	mkdirSync(projectDir(cwd), { recursive: true });
-	writeFileSync(join(projectDir(cwd), `${sessionId}.jsonl`), `${lines.join("\n")}\n`);
+	mkdirSync(projectDir(cwd, configDir), { recursive: true });
+	writeFileSync(join(projectDir(cwd, configDir), `${sessionId}.jsonl`), `${lines.join("\n")}\n`);
 	return { sessionId, at: parent! };
+}
+
+/**
+ * Agent SDK session store over the transcript files of one Claude Code config dir. The SDK's
+ * session functions read the process environment for that dir; this lets them work on a
+ * provider's own dir without touching `process.env`.
+ */
+export function configDirStore(cwd: string, configDir: string): SessionStore {
+	const file = (key: SessionKey) => {
+		const name = key.subpath ? join(key.sessionId, `${key.subpath}.jsonl`) : `${key.sessionId}.jsonl`;
+		return (!key.subpath && sessionFile(cwd, key.sessionId, configDir)) || join(projectDir(cwd, configDir), name);
+	};
+	return {
+		async load(key) {
+			const f = file(key);
+			if (!existsSync(f)) return null;
+			return readFileSync(f, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((l) => JSON.parse(l) as SessionStoreEntry);
+		},
+		async append(key, entries) {
+			const f = file(key);
+			mkdirSync(join(f, ".."), { recursive: true });
+			appendFileSync(f, entries.map((e) => `${JSON.stringify(e)}\n`).join(""));
+		},
+	};
 }
